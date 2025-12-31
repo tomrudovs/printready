@@ -40,15 +40,6 @@ function downloadBlob(blob, filename) {
   }, 1500);
 }
 
-function getSelectionText() {
-  try {
-    const sel = window.getSelection?.();
-    return sel && sel.toString ? sel.toString() : '';
-  } catch {
-    return '';
-  }
-}
-
 function isTypingTarget(el) {
   const tag = el?.tagName?.toLowerCase();
   if (!tag) return false;
@@ -432,11 +423,11 @@ const FastImageProcessor = {
       if (d[i + 3] < 10) continue;
 
       if (is565) {
-        d[i]     = (d[i]     & 0xF8);
+        d[i] = (d[i] & 0xF8);
         d[i + 1] = (d[i + 1] & 0xFC);
         d[i + 2] = (d[i + 2] & 0xF8);
       } else {
-        d[i]     = (d[i]     & 0xF8);
+        d[i] = (d[i] & 0xF8);
         d[i + 1] = (d[i + 1] & 0xF8);
         d[i + 2] = (d[i + 2] & 0xF8);
       }
@@ -536,21 +527,19 @@ const FastImageProcessor = {
 
     // ---- Adaptive params for 5x-10x ----
     const denoiseStrength = s >= 8 ? 0.58 : s >= 6 ? 0.52 : s >= 4 ? 0.42 : 0.28;
-    const casStrength     = s >= 8 ? 0.82 : s >= 6 ? 0.78 : s >= 4 ? 0.70 : 0.60;
+    const casStrength = s >= 8 ? 0.82 : s >= 6 ? 0.78 : s >= 4 ? 0.70 : 0.60;
     const deblockStrength = s >= 8 ? 0.50 : s >= 6 ? 0.45 : s >= 4 ? 0.38 : 0.32;
-    const flatThr         = s >= 8 ? 22   : s >= 6 ? 20   : 18;
+    const flatThr = s >= 8 ? 22 : s >= 6 ? 20 : 18;
 
     if (isUpscale) {
       this.deblockLite(upscaledCanvas, deblockStrength, flatThr);
       this.cheapDenoise(upscaledCanvas, denoiseStrength);
       this.casSharpen(upscaledCanvas, casStrength);
 
-      // tiny unsharp for photos only (avoid halos at huge scales)
       if (!isLineArt && s < 6) {
         this.smartSharpen(upscaledCanvas, 0.22, 1.05);
       }
 
-      // grain only עד פי 6 (פי 10 לא מוסיף איכות ורק מנפח PNG)
       if (s < 6) {
         this.addFilmGrain(upscaledCanvas, isLineArt ? 2 : 3);
       }
@@ -568,7 +557,6 @@ const FastImageProcessor = {
 
     if (upscaledCanvas) upscaledCanvas.width = 0;
 
-    // ---- POD simulation (optional) ----
     if (
       podSettings?.saturationReduction < 1 ||
       podSettings?.darknessIncrease < 1 ||
@@ -579,7 +567,6 @@ const FastImageProcessor = {
       ctx.putImageData(data, 0, 0);
     }
 
-    // ---- FINAL SIZE OPTIMIZATION (FAST) ----
     this.cleanupAlpha(out);
     if (scale >= 3) {
       this.quantizeBitDepth(out, isLineArt ? '555' : '565');
@@ -592,7 +579,6 @@ const FastImageProcessor = {
     return { blob, width: tW, height: tH, ms: performance.now() - start };
   }
 };
-
 
 // ===================== CSS FILTERS FOR INSTANT PREVIEW =====================
 const getCssFilters = (settings) => ({
@@ -871,7 +857,7 @@ function VirtualCanvasFrame({ targetW, targetH, fallbackW, fallbackH, children }
   const aspect = `${w} / ${h}`;
 
   return (
-    <div className="w-full h-full flex items-center justify-center p-6">
+    <div className="w-full h-full flex items-center justify-center p-4 sm:p-6">
       <div
         className="w-full max-w-full max-h-full rounded-2xl overflow-hidden relative"
         style={{ aspectRatio: aspect }}
@@ -972,6 +958,10 @@ export default function App() {
 
   const [showShortcuts, setShowShortcuts] = useState(false);
 
+  // ✅ Mobile responsive controls
+  const [activePanel, setActivePanel] = useState('result'); // 'original' | 'result'
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+
   const fileInputRef = useRef(null);
   const FREE_LIMIT = 5;
 
@@ -1064,6 +1054,9 @@ export default function App() {
       const newCount = usageCount + 1;
       setUsageCount(newCount);
       saveUsage(newCount);
+
+      // Mobile UX: show result immediately, keep settings closed unless user opens
+      setActivePanel('result');
     } catch (err) {
       console.error('Cutout error:', err);
     } finally {
@@ -1127,6 +1120,8 @@ export default function App() {
     setCustomWidth('');
     setCustomHeight('');
     setShowCustomInput(false);
+    setMobileSheetOpen(false);
+    setActivePanel('result');
   };
 
   const resetSettings = () => {
@@ -1145,7 +1140,7 @@ export default function App() {
     });
   };
 
-  // ============ Clipboard: Paste Image OR JSON settings (optional) ============
+  // ============ Clipboard: Paste Image ============
   useEffect(() => {
     const onPaste = async (e) => {
       if (isTypingTarget(document.activeElement)) return;
@@ -1174,7 +1169,6 @@ export default function App() {
     const onKeyDown = (e) => {
       if (isTypingTarget(document.activeElement)) return;
 
-      // Shift + /  -> '?'
       if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         setShowShortcuts(s => !s);
@@ -1188,7 +1182,7 @@ export default function App() {
 
   // ============ UI ============
   return (
-    <div className="h-screen flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
+    <div className="min-h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
       <style>{`
         .transparency-grid {
           background-image: 
@@ -1242,7 +1236,7 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="h-14 border-b border-white/5 flex items-center justify-between px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-20 shrink-0">
+      <header className="h-14 border-b border-white/5 flex items-center justify-between px-4 sm:px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-20 shrink-0">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-gradient-to-br from-violet-600 to-fuchsia-600 rounded-xl shadow-lg shadow-violet-500/20">
             <Shirt size={18} className="text-white" />
@@ -1253,30 +1247,30 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {detectedBg && (
-            <span className={`text-xs px-2 py-1 rounded-full font-medium flex items-center gap-1.5 ${detectedBg === 'black' ? 'bg-slate-800 text-slate-300' : 'bg-white/10 text-white'}`}>
+            <span className={`hidden sm:flex text-xs px-2 py-1 rounded-full font-medium items-center gap-1.5 ${detectedBg === 'black' ? 'bg-slate-800 text-slate-300' : 'bg-white/10 text-white'}`}>
               {detectedBg === 'black' ? <Moon size={12} /> : <Sun size={12} />}
               {detectedBg} bg
             </span>
           )}
           {cutoutMeta?.classification && (
-            <span className="text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
+            <span className="hidden sm:inline text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
               {cutoutMeta.classification.isLineArt ? 'line-art' : 'photo'}
             </span>
           )}
 
           <button
             onClick={() => setShowShortcuts(true)}
-            className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 flex items-center gap-2"
+            className="hidden sm:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
             title="Shortcuts ( ? )"
           >
             <HelpCircle size={14} className="text-violet-300" />
             Shortcuts
           </button>
 
-          {!isPro && <span className="text-xs text-slate-500">{FREE_LIMIT - usageCount} free left</span>}
-          <button onClick={() => isPro ? setIsPro(false) : setShowProModal(true)} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${isPro ? 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-lg shadow-orange-500/20' : 'bg-violet-600 hover:bg-violet-500 text-white'}`}>
+          {!isPro && <span className="hidden sm:inline text-xs text-slate-500">{FREE_LIMIT - usageCount} free left</span>}
+          <button onClick={() => isPro ? setIsPro(false) : setShowProModal(true)} className={`px-3 sm:px-4 py-1.5 rounded-full text-xs font-bold transition-all ${isPro ? 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-lg shadow-orange-500/20' : 'bg-violet-600 hover:bg-violet-500 text-white'}`}>
             {isPro ? <span className="flex items-center gap-1.5"><Crown size={12} /> PRO</span> : 'Upgrade'}
           </button>
         </div>
@@ -1284,7 +1278,10 @@ export default function App() {
 
       {/* Main */}
       <div className="flex-1 flex overflow-hidden">
-        <main className="flex-1 flex items-stretch p-6 gap-6 overflow-hidden">
+        <main
+          className={`flex-1 flex flex-col lg:flex-row items-stretch p-3 sm:p-4 lg:p-6 gap-3 sm:gap-4 lg:gap-6 overflow-hidden
+          ${originalImage ? 'pb-24 lg:pb-6' : ''}`}
+        >
           {!originalImage ? (
             <div className="flex-1 flex items-center justify-center">
               <div
@@ -1292,17 +1289,17 @@ export default function App() {
                 onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }}
                 onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
                 onClick={() => fileInputRef.current?.click()}
-                className="max-w-xl w-full glass-panel rounded-3xl p-16 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center group"
+                className="max-w-xl w-full glass-panel rounded-3xl p-10 sm:p-16 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center group"
               >
                 <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
-                <div className="w-28 h-28 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-8 group-hover:scale-110 transition-transform duration-300">
+                <div className="w-24 h-24 sm:w-28 sm:h-28 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-6 sm:mb-8 group-hover:scale-110 transition-transform duration-300">
                   <Upload className="text-violet-400" size={44} />
                 </div>
-                <h2 className="text-3xl font-bold text-white mb-4">Drop your design here</h2>
-                <p className="text-slate-400 text-base mb-4">PNG, JPG, or WebP • Black or white background</p>
-                <p className="text-slate-500 text-sm mb-8">Tip: paste an image (Ctrl/⌘+V)</p>
-                <div className="inline-block px-10 py-4 bg-violet-600 hover:bg-violet-500 rounded-xl text-base font-semibold transition-colors">Browse Files</div>
-                <div className="mt-10 flex items-center justify-center gap-8 text-sm text-slate-500">
+                <h2 className="text-2xl sm:text-3xl font-bold text-white mb-3 sm:mb-4">Drop your design here</h2>
+                <p className="text-slate-400 text-base mb-3 sm:mb-4">PNG, JPG, or WebP • Black or white background</p>
+                <p className="text-slate-500 text-sm mb-6 sm:mb-8">Tip: paste an image (Ctrl/⌘+V)</p>
+                <div className="inline-block px-8 sm:px-10 py-3 sm:py-4 bg-violet-600 hover:bg-violet-500 rounded-xl text-base font-semibold transition-colors">Browse Files</div>
+                <div className="mt-8 sm:mt-10 flex items-center justify-center gap-6 sm:gap-8 text-sm text-slate-500 flex-wrap">
                   <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Instant preview</span>
                   <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> One-time cutout</span>
                   <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Export enhancement</span>
@@ -1311,8 +1308,24 @@ export default function App() {
             </div>
           ) : (
             <>
+              {/* Mobile Tabs */}
+              <div className="lg:hidden glass-panel rounded-2xl p-2 flex gap-2 mb-1 shrink-0">
+                <button
+                  onClick={() => setActivePanel('original')}
+                  className={`flex-1 py-3 rounded-xl text-sm font-bold transition ${activePanel === 'original' ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-300'}`}
+                >
+                  Original
+                </button>
+                <button
+                  onClick={() => setActivePanel('result')}
+                  className={`flex-1 py-3 rounded-xl text-sm font-bold transition ${activePanel === 'result' ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-300'}`}
+                >
+                  Result
+                </button>
+              </div>
+
               {/* Original */}
-              <div className="flex-1 flex flex-col min-w-0">
+              <div className={`flex-1 flex flex-col min-w-0 ${activePanel === 'result' ? 'hidden lg:flex' : ''}`}>
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
                   <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"><X size={16} /></button>
@@ -1344,7 +1357,7 @@ export default function App() {
               </div>
 
               {/* Result */}
-              <div className="flex-1 flex flex-col min-w-0">
+              <div className={`flex-1 flex flex-col min-w-0 ${activePanel === 'original' ? 'hidden lg:flex' : ''}`}>
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
                     {viewMode === 'mockup' ? 'Mockup' : viewMode === 'png' ? 'Cutout PNG' : 'Compare'}
@@ -1449,9 +1462,31 @@ export default function App() {
           )}
         </main>
 
-        {/* Sidebar */}
-        <aside className="w-80 border-l border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl flex flex-col shrink-0">
-          <div className="p-5 overflow-y-auto flex-1 space-y-6">
+        {/* Sidebar (Desktop) / Bottom Sheet (Mobile) */}
+        <aside
+          className={`
+            lg:w-80 lg:border-l lg:border-white/5 lg:bg-[#0c0c0f]/90 lg:backdrop-blur-xl
+            lg:static lg:translate-y-0 lg:z-auto
+            fixed inset-x-0 bottom-0 z-40
+            bg-[#0c0c0f]/95 backdrop-blur-xl
+            border-t border-white/10
+            transition-transform duration-300
+            ${mobileSheetOpen ? 'translate-y-0' : 'translate-y-[calc(100%-68px)]'}
+          `}
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          {/* Sheet Handle (Mobile) */}
+          <div className="lg:hidden px-4 py-3 flex items-center justify-between">
+            <div className="text-sm font-bold text-white">Settings</div>
+            <button
+              onClick={() => setMobileSheetOpen(o => !o)}
+              className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold transition"
+            >
+              {mobileSheetOpen ? 'Close' : 'Open'}
+            </button>
+          </div>
+
+          <div className="p-5 overflow-y-auto flex-1 space-y-6 max-h-[70dvh] lg:max-h-none">
             {/* Size Presets */}
             <section className="glass-panel rounded-xl p-4">
               <div className="flex items-center justify-between mb-3">
@@ -1640,10 +1675,23 @@ export default function App() {
               )}
             </section>
 
+            {/* Download (inside sheet scroll) */}
+            <div className="lg:hidden p-0">
+              <button
+                onClick={downloadImage}
+                disabled={!cutoutUrl || processing}
+                className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
+              >
+                <Download size={20} /> Download PNG
+              </button>
+              <p className="text-[10px] text-center text-slate-600 mt-3">
+                {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
+              </p>
+            </div>
           </div>
 
-          {/* Download */}
-          <div className="p-5 bg-[#08080a] border-t border-white/5">
+          {/* Download (Desktop Footer) */}
+          <div className="hidden lg:block p-5 bg-[#08080a] border-t border-white/5">
             <button
               onClick={downloadImage}
               disabled={!cutoutUrl || processing}
@@ -1657,6 +1705,36 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {/* Mobile Bottom Bar */}
+      {originalImage && (
+        <div className="lg:hidden fixed inset-x-0 bottom-0 z-50 px-3 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
+          <div className="glass-panel rounded-2xl p-2 flex gap-2">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex-1 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition"
+            >
+              <Upload size={16} /> Upload
+            </button>
+
+            <button
+              onClick={downloadImage}
+              disabled={!cutoutUrl || processing}
+              className="flex-1 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 text-white font-bold text-sm flex items-center justify-center gap-2 transition"
+            >
+              <Download size={16} /> Download
+            </button>
+
+            <button
+              onClick={() => setMobileSheetOpen(true)}
+              className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm flex items-center justify-center transition"
+              title="Settings"
+            >
+              <Sliders size={16} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
