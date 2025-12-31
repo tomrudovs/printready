@@ -4,7 +4,7 @@ import {
   Upload, Shirt, Download, RefreshCw, X, Check,
   Sliders, ChevronDown, Sparkles, Sun, Moon,
   Zap, Crown, Lock, ZoomIn, ZoomOut, RotateCcw,
-  Layers, Move, Maximize2, SplitSquareHorizontal,
+  Move, Maximize2, SplitSquareHorizontal,
   HelpCircle
 } from 'lucide-react';
 
@@ -48,7 +48,26 @@ function isTypingTarget(el) {
   return false;
 }
 
-// ===================== FAST “GIGAPIXEL-ISH” PROCESSOR (UNCHANGED) =====================
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia(query).matches;
+  });
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = (e) => setMatches(e.matches);
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else mql.addListener(onChange);
+    setMatches(mql.matches);
+    return () => {
+      if (mql.removeEventListener) mql.removeEventListener('change', onChange);
+      else mql.removeListener(onChange);
+    };
+  }, [query]);
+  return matches;
+}
+
+// ===================== FAST “GIGAPIXEL-ISH” PROCESSOR =====================
 const FastImageProcessor = {
   clamp(n, a, b) { return Math.max(a, Math.min(b, n)); },
 
@@ -394,7 +413,6 @@ const FastImageProcessor = {
       if (a < 8) d[i + 3] = 0;
       else if (a > 247) d[i + 3] = 255;
     }
-
     ctx.putImageData(img, 0, 0);
   },
 
@@ -418,7 +436,6 @@ const FastImageProcessor = {
         d[i + 2] = (d[i + 2] & 0xF8);
       }
     }
-
     ctx.putImageData(img, 0, 0);
   },
 
@@ -568,158 +585,169 @@ const getCssFilters = (settings) => ({
   willChange: 'filter',
 });
 
-// ===================== TINY TOAST =====================
-function Toast({ message, onClose }) {
-  useEffect(() => {
-    if (!message) return;
-    const t = setTimeout(onClose, 2600);
-    return () => clearTimeout(t);
-  }, [message, onClose]);
-
-  if (!message) return null;
+// ===================== TOAST =====================
+function Toast({ toast, onClose }) {
+  if (!toast) return null;
   return (
-    <div className="fixed z-[80] left-1/2 -translate-x-1/2 top-4 px-4">
-      <div className="bg-black/70 backdrop-blur-md border border-white/10 text-slate-200 text-sm px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3">
-        <span className="text-slate-200">{message}</span>
-        <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10 text-slate-300">
-          <X size={14} />
+    <div className="fixed z-[80] left-1/2 -translate-x-1/2 bottom-[calc(env(safe-area-inset-bottom)+84px)] md:bottom-6 px-4">
+      <div className="bg-black/80 backdrop-blur-md border border-white/10 text-white rounded-2xl shadow-2xl px-4 py-3 flex items-start gap-3 max-w-[520px]">
+        <div className="mt-0.5">
+          <div className="w-2 h-2 rounded-full bg-violet-400" />
+        </div>
+        <div className="text-sm text-slate-200 leading-snug">{toast}</div>
+        <button onClick={onClose} className="ml-auto p-1 rounded-lg hover:bg-white/10 text-slate-300">
+          <X size={16} />
         </button>
       </div>
     </div>
   );
 }
 
-// ===================== PINCH + PAN HOOK =====================
-function usePinchPanZoom({ defaultZoom = 1, minZoom = 0.6, maxZoom = 5 }) {
+// ===================== PINCH+PAN HOOK =====================
+function usePinchPan({ defaultZoom = 1, minZoom = 0.6, maxZoom = 5, allowPanAt1 = false } = {}) {
   const [zoom, setZoom] = useState(defaultZoom);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  const [pan, setPan] = useState({ x: 0, y: 0 });
 
   const pointers = useRef(new Map());
-  const pinch = useRef({
-    active: false,
+  const gesture = useRef({
+    pinching: false,
+    panning: false,
     startDist: 0,
-    startZoom: defaultZoom,
-    startMid: { x: 0, y: 0 },
-    startPos: { x: 0, y: 0 },
+    startZoom: 1,
+    startPan: { x: 0, y: 0 },
+    startCenter: { x: 0, y: 0 },
+    lastPanStart: { x: 0, y: 0 },
   });
 
   const reset = useCallback(() => {
     setZoom(defaultZoom);
-    setPos({ x: 0, y: 0 });
-  }, [defaultZoom]);
-
-  useEffect(() => {
-    // when defaultZoom changes (e.g. switching view), only reset if user hasn't moved
-    // keep it simple: do nothing here to avoid jank
+    setPan({ x: 0, y: 0 });
+    gesture.current.pinching = false;
+    gesture.current.panning = false;
+    pointers.current.clear();
   }, [defaultZoom]);
 
   const onPointerDown = useCallback((e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { }
 
-    if (pointers.current.size === 2) {
-      const pts = Array.from(pointers.current.values());
+    const pts = [...pointers.current.values()];
+
+    if (pts.length === 2) {
       const dx = pts[0].x - pts[1].x;
       const dy = pts[0].y - pts[1].y;
-      const dist = Math.hypot(dx, dy);
-
-      pinch.current.active = true;
-      pinch.current.startDist = dist || 1;
-      pinch.current.startZoom = zoom;
-      pinch.current.startPos = { ...pos };
-      pinch.current.startMid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-
-      setDragging(false);
-      return;
+      gesture.current.pinching = true;
+      gesture.current.panning = false;
+      gesture.current.startDist = Math.hypot(dx, dy);
+      gesture.current.startZoom = zoom;
+      gesture.current.startPan = { ...pan };
+      gesture.current.startCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+    } else if (pts.length === 1) {
+      if (zoom > 1 || allowPanAt1) {
+        gesture.current.panning = true;
+        gesture.current.pinching = false;
+        gesture.current.lastPanStart = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+      }
     }
-
-    if (zoom > 1) {
-      setDragging(true);
-      dragStart.current = { x: e.clientX - pos.x, y: e.clientY - pos.y };
-    }
-  }, [zoom, pos]);
+  }, [zoom, pan, allowPanAt1]);
 
   const onPointerMove = useCallback((e) => {
     if (!pointers.current.has(e.pointerId)) return;
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    if (pointers.current.size === 2 && pinch.current.active) {
-      const pts = Array.from(pointers.current.values());
+    const pts = [...pointers.current.values()];
+
+    if (pts.length === 2 && gesture.current.pinching) {
       const dx = pts[0].x - pts[1].x;
       const dy = pts[0].y - pts[1].y;
       const dist = Math.hypot(dx, dy) || 1;
 
-      const ratio = dist / pinch.current.startDist;
-      const nextZoom = clamp(pinch.current.startZoom * ratio, minZoom, maxZoom);
+      const nextZoom = clamp(gesture.current.startZoom * (dist / (gesture.current.startDist || 1)), minZoom, maxZoom);
 
-      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-      const midDelta = { x: mid.x - pinch.current.startMid.x, y: mid.y - pinch.current.startMid.y };
+      const center = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      const deltaCenter = { x: center.x - gesture.current.startCenter.x, y: center.y - gesture.current.startCenter.y };
 
       setZoom(nextZoom);
-      setPos({ x: pinch.current.startPos.x + midDelta.x, y: pinch.current.startPos.y + midDelta.y });
+      setPan({
+        x: gesture.current.startPan.x + deltaCenter.x,
+        y: gesture.current.startPan.y + deltaCenter.y
+      });
       return;
     }
 
-    if (dragging) {
-      setPos({ x: e.clientX - dragStart.current.x, y: e.clientY - dragStart.current.y });
+    if (gesture.current.panning && pts.length === 1) {
+      setPan({
+        x: e.clientX - gesture.current.lastPanStart.x,
+        y: e.clientY - gesture.current.lastPanStart.y
+      });
     }
-  }, [dragging, minZoom, maxZoom]);
+  }, [minZoom, maxZoom]);
 
-  const endPointer = useCallback((e) => {
+  const onPointerUp = useCallback((e) => {
     pointers.current.delete(e.pointerId);
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { }
 
-    if (pointers.current.size < 2) pinch.current.active = false;
-    if (pointers.current.size === 0) setDragging(false);
+    const ptsLen = pointers.current.size;
+    if (ptsLen < 2) gesture.current.pinching = false;
+    if (ptsLen === 0) gesture.current.panning = false;
   }, []);
 
-  const onWheel = useCallback((e) => {
-    e.preventDefault();
-    const step = (e.ctrlKey || e.metaKey) ? 0.22 : 0.12;
-    const dir = e.deltaY > 0 ? -step : step;
-    setZoom(z => clamp(z + dir, minZoom, maxZoom));
+  const setZoomClamped = useCallback((fnOrValue) => {
+    setZoom((z) => {
+      const val = typeof fnOrValue === 'function' ? fnOrValue(z) : fnOrValue;
+      return clamp(val, minZoom, maxZoom);
+    });
   }, [minZoom, maxZoom]);
 
-  const quickToggle = useCallback(() => {
-    setZoom(z => (z < 1.5 ? 2 : defaultZoom));
-    setPos({ x: 0, y: 0 });
-  }, [defaultZoom]);
-
   return {
-    zoom, setZoom,
-    pos, setPos,
-    dragging,
-    onPointerDown, onPointerMove, onPointerUp: endPointer, onPointerCancel: endPointer,
-    onWheel,
+    zoom,
+    pan,
+    setZoom: setZoomClamped,
+    setPan,
     reset,
-    quickToggle,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    isInteracting: gesture.current.pinching || gesture.current.panning,
   };
 }
 
 // ===================== ZOOMABLE IMAGE =====================
-function ZoomableImage({ src, alt, className, containerClassName, style = {}, defaultZoom = 1 }) {
-  const containerRef = useRef(null);
+function ZoomableImage({ src, alt, className, containerClassName, style = {}, defaultZoom = 1, hint = true }) {
   const {
-    zoom, setZoom,
-    pos, dragging,
-    onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
-    onWheel,
-    reset,
-    quickToggle
-  } = usePinchPanZoom({ defaultZoom, minZoom: 0.5, maxZoom: 5 });
+    zoom, pan, setZoom, reset,
+    onPointerDown, onPointerMove, onPointerUp,
+  } = usePinchPan({ defaultZoom, minZoom: 0.6, maxZoom: 5, allowPanAt1: false });
+
+  const containerRef = useRef(null);
+  const [showHint, setShowHint] = useState(true);
+  useEffect(() => {
+    if (!hint) return;
+    const t = setTimeout(() => setShowHint(false), 2200);
+    return () => clearTimeout(t);
+  }, [hint]);
+
+  const handleWheel = useCallback((e) => {
+    if (e.pointerType === 'touch') return;
+    e.preventDefault();
+    const step = (e.ctrlKey || e.metaKey) ? 0.22 : 0.12;
+    const dir = e.deltaY > 0 ? -step : step;
+    setZoom(z => z + dir);
+  }, [setZoom]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [onWheel]);
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
-  // Touch behavior:
-  // - when zoom <= 1: allow vertical scrolling (pan-y)
-  // - when zoom > 1: disable scrolling inside to allow pan/pinch
+  const onDoubleClick = () => {
+    setZoom(z => (z < 1.5 ? 2 : defaultZoom));
+  };
+
   const touchAction = zoom > 1 ? 'none' : 'pan-y';
 
   return (
@@ -729,13 +757,10 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
+      onPointerCancel={onPointerUp}
       onPointerLeave={onPointerUp}
-      onDoubleClick={quickToggle}
-      style={{
-        cursor: zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'default',
-        touchAction
-      }}
+      onDoubleClick={onDoubleClick}
+      style={{ cursor: zoom > 1 ? 'grab' : 'default', touchAction }}
     >
       <img
         src={src}
@@ -744,8 +769,8 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
         draggable={false}
         style={{
           ...style,
-          transform: `scale(${zoom}) translate(${pos.x / zoom}px, ${pos.y / zoom}px)`,
-          transition: dragging ? 'none' : 'transform 0.15s ease-out',
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transition: 'transform 0.12s ease-out',
           transformOrigin: 'center center',
           willChange: 'transform'
         }}
@@ -753,11 +778,11 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
 
       {/* Controls */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/70 backdrop-blur-md rounded-full px-2 py-1.5 shadow-xl border border-white/10">
-        <button onClick={() => setZoom(z => Math.max(0.5, z - 0.25))} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
+        <button onClick={() => setZoom(z => z - 0.25)} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
           <ZoomOut size={16} />
         </button>
         <span className="px-3 min-w-[60px] text-center text-xs font-mono text-white/90">{Math.round(zoom * 100)}%</span>
-        <button onClick={() => setZoom(z => Math.min(5, z + 0.25))} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
+        <button onClick={() => setZoom(z => z + 0.25)} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
           <ZoomIn size={16} />
         </button>
         <div className="w-px h-5 bg-white/20 mx-1" />
@@ -766,10 +791,9 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
         </button>
       </div>
 
-      {/* Small hint, minimized on mobile */}
-      {zoom > 1 && (
-        <div className="absolute top-2 left-2 bg-black/55 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white/70 flex items-center gap-1 max-w-[75%]">
-          <Move size={10} /> Drag to pan • Pinch to zoom
+      {hint && showHint && (
+        <div className="absolute top-3 left-3 bg-black/55 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] text-white/70 flex items-center gap-1">
+          <Move size={10} /> Drag / Pinch • Double click zoom
         </div>
       )}
     </div>
@@ -777,26 +801,23 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
 }
 
 // ===================== COMPARE VIEW =====================
-function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.35, mobileDefaultZoom = 1.25 }) {
-  const [pos, setPos] = useState(50);
+function CompareView({
+  beforeSrc,
+  afterSrc,
+  afterStyle,
+  defaultZoom = 1.2,
+  defaultPos = 54,
+  backgroundColor,
+  showFabric = true,
+}) {
+  const [pos, setPos] = useState(defaultPos);
   const containerRef = useRef(null);
   const draggingSlider = useRef(false);
 
-  const isCoarse = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    return window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
-  }, []);
-
-  const dz = isCoarse ? mobileDefaultZoom : defaultZoom;
-
   const {
-    zoom, setZoom,
-    pos: pan,
-    dragging: panning,
-    onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
-    onWheel,
-    reset,
-  } = usePinchPanZoom({ defaultZoom: dz, minZoom: 0.6, maxZoom: 5 });
+    zoom, pan, setZoom, reset,
+    onPointerDown, onPointerMove, onPointerUp,
+  } = usePinchPan({ defaultZoom, minZoom: 0.6, maxZoom: 5, allowPanAt1: false });
 
   const setByClientX = useCallback((clientX) => {
     const el = containerRef.current;
@@ -817,6 +838,13 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.35, mobi
     };
   }, [setByClientX]);
 
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const step = (e.ctrlKey || e.metaKey) ? 0.22 : 0.12;
+    const dir = e.deltaY > 0 ? -step : step;
+    setZoom(z => z + dir);
+  }, [setZoom]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -826,87 +854,110 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.35, mobi
 
   const clipRight = 100 - pos;
 
-  // Touch behavior: allow scroll when not zoomed, otherwise handle pan/pinch
+  // Important: alignment is perfect because cutout and original share exact pixel size.
+  const innerTransform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
   const touchAction = zoom > 1 ? 'none' : 'pan-y';
 
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full overflow-hidden rounded-2xl select-none transparency-grid"
-      style={{ cursor: zoom > 1 ? (panning ? 'grabbing' : 'grab') : 'ew-resize', touchAction }}
+      className="relative w-full h-full overflow-hidden rounded-2xl select-none"
+      style={{
+        touchAction,
+        backgroundColor,
+      }}
       onPointerDown={(e) => {
-        // If user starts on slider handle, don't start pan
-        if (draggingSlider.current) return;
+        // if slider handle is grabbed, don't start pan
+        if (e.target?.dataset?.slider === '1') return;
         onPointerDown(e);
       }}
-      onPointerMove={onPointerMove}
+      onPointerMove={(e) => {
+        if (draggingSlider.current) return;
+        onPointerMove(e);
+      }}
       onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
+      onPointerCancel={onPointerUp}
       onPointerLeave={onPointerUp}
     >
-      {/* unified transform layer so BOTH images align perfectly */}
+      {showFabric && <div className="absolute inset-0 fabric-texture opacity-[0.18]" />}
+
+      {/* AFTER (cutout) */}
       <div className="absolute inset-0 flex items-center justify-center p-4 sm:p-6">
         <div
           className="relative w-full h-full"
           style={{
-            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transform: innerTransform,
             transformOrigin: 'center',
             willChange: 'transform'
           }}
         >
-          {/* AFTER (cutout) */}
-          <div className="absolute inset-0 flex items-center justify-center">
-            <img
-              src={afterSrc}
-              alt="Transparent Output"
-              className="w-full h-full object-contain drop-shadow-2xl"
-              style={afterStyle}
-              draggable={false}
-            />
-          </div>
+          <img
+            src={afterSrc}
+            alt="Transparent Output"
+            draggable={false}
+            className="absolute inset-0 w-full h-full object-contain drop-shadow-2xl"
+            style={afterStyle}
+          />
+        </div>
+      </div>
 
-          {/* BEFORE (original) clipped */}
-          <div className="absolute inset-0" style={{ clipPath: `inset(0 ${clipRight}% 0 0)` }}>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <img
-                src={beforeSrc}
-                alt="Original"
-                className="w-full h-full object-contain drop-shadow-2xl"
-                draggable={false}
-              />
-            </div>
+      {/* BEFORE clipped (original) */}
+      <div className="absolute inset-0" style={{ clipPath: `inset(0 ${clipRight}% 0 0)` }}>
+        <div className="absolute inset-0 flex items-center justify-center p-4 sm:p-6">
+          <div
+            className="relative w-full h-full"
+            style={{
+              transform: innerTransform,
+              transformOrigin: 'center',
+              willChange: 'transform'
+            }}
+          >
+            <img
+              src={beforeSrc}
+              alt="Original"
+              draggable={false}
+              className="absolute inset-0 w-full h-full object-contain drop-shadow-2xl"
+            />
           </div>
         </div>
       </div>
 
-      {/* Slider line */}
+      {/* Slider */}
       <div
-        className="absolute top-0 bottom-0 w-0.5 bg-white/80 shadow-lg z-10"
+        className="absolute top-0 bottom-0 w-0.5 bg-white/85 shadow-lg z-20"
         style={{ left: `${pos}%`, transform: 'translateX(-50%)' }}
+        data-slider="1"
         onMouseDown={(e) => { draggingSlider.current = true; setByClientX(e.clientX); e.stopPropagation(); }}
         onTouchStart={(e) => { draggingSlider.current = true; setByClientX(e.touches[0].clientX); e.stopPropagation(); }}
         onTouchMove={(e) => { setByClientX(e.touches[0].clientX); e.stopPropagation(); }}
         onTouchEnd={() => (draggingSlider.current = false)}
       >
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 bg-white rounded-full shadow-xl flex items-center justify-center border-2 border-white/50">
-          <div className="flex gap-0.5">
-            <ChevronDown size={14} className="text-slate-700 rotate-90" />
-            <ChevronDown size={14} className="text-slate-700 -rotate-90" />
+        <div
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 bg-white rounded-full shadow-xl flex items-center justify-center border-2 border-white/60"
+          data-slider="1"
+        >
+          <div className="flex gap-0.5" data-slider="1">
+            <ChevronDown size={14} className="text-slate-700 rotate-90" data-slider="1" />
+            <ChevronDown size={14} className="text-slate-700 -rotate-90" data-slider="1" />
           </div>
         </div>
       </div>
 
-      {/* Labels */}
-      <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-20">Original</div>
-      <div className="absolute top-3 right-3 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-20">Cutout</div>
+      {/* Labels (tiny on mobile) */}
+      <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] text-white/90 font-medium z-30">
+        Original
+      </div>
+      <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] text-white/90 font-medium z-30">
+        Cutout
+      </div>
 
-      {/* Controls */}
+      {/* Compare controls */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/70 backdrop-blur-md rounded-full px-2 py-1.5 shadow-xl border border-white/10 z-30">
-        <button onClick={() => setZoom(z => Math.max(0.6, z - 0.2))} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
+        <button onClick={() => setZoom(z => z - 0.2)} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
           <ZoomOut size={16} />
         </button>
         <span className="px-3 min-w-[60px] text-center text-xs font-mono text-white/90">{Math.round(zoom * 100)}%</span>
-        <button onClick={() => setZoom(z => Math.min(5, z + 0.2))} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
+        <button onClick={() => setZoom(z => z + 0.2)} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white">
           <ZoomIn size={16} />
         </button>
         <div className="w-px h-5 bg-white/20 mx-1" />
@@ -915,9 +966,9 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.35, mobi
         </button>
       </div>
 
-      {/* Hint (smaller on mobile) */}
-      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-black/45 backdrop-blur-sm px-3 py-1 rounded-full text-[9px] text-white/60 z-20 max-w-[92%] text-center">
-        Drag slider • Pinch/scroll zoom • Drag to pan (when zoomed)
+      {/* Hint (less intrusive) */}
+      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-black/40 backdrop-blur-sm px-3 py-1 rounded-full text-[9px] text-white/65 z-30 hidden sm:block">
+        Drag slider • Pinch/Wheel zoom • Drag to pan
       </div>
     </div>
   );
@@ -930,8 +981,11 @@ function VirtualCanvasFrame({ targetW, targetH, fallbackW, fallbackH, children }
   const aspect = `${w} / ${h}`;
 
   return (
-    <div className="w-full h-full flex items-center justify-center p-4 sm:p-6">
-      <div className="w-full max-w-full max-h-full rounded-2xl overflow-hidden relative" style={{ aspectRatio: aspect }}>
+    <div className="w-full h-full flex items-center justify-center p-3 sm:p-4">
+      <div
+        className="w-full h-full rounded-2xl overflow-hidden relative"
+        style={{ aspectRatio: aspect }}
+      >
         {children}
       </div>
     </div>
@@ -944,12 +998,13 @@ function ShortcutsModal({ open, onClose }) {
 
   const shortcuts = [
     { keys: 'Ctrl/⌘ + V', desc: 'Paste an image from clipboard (desktop)' },
-    { keys: 'Shift + /  ( ? )', desc: 'Open/close this shortcuts panel' },
     { keys: 'Mouse Wheel', desc: 'Zoom in/out in preview' },
     { keys: 'Ctrl/⌘ + Wheel', desc: 'Faster zoom' },
-    { keys: 'Pinch', desc: 'Zoom on mobile/tablet' },
-    { keys: 'Drag (when zoomed)', desc: 'Pan around the image' },
-    { keys: 'Compare: Drag slider', desc: 'Reveal original vs cutout' },
+    { keys: 'Double Click', desc: 'Quick zoom (1× ↔ 2×)' },
+    { keys: 'Pinch (mobile)', desc: 'Pinch-to-zoom with two fingers' },
+    { keys: 'Drag (zoomed)', desc: 'Pan around the image' },
+    { keys: 'Compare: slider', desc: 'Reveal original vs cutout' },
+    { keys: 'Esc', desc: 'Close modals / settings' },
   ];
 
   return (
@@ -961,7 +1016,7 @@ function ShortcutsModal({ open, onClose }) {
               <HelpCircle size={18} className="text-violet-300" />
             </div>
             <div>
-              <div className="text-white font-bold">Keyboard & Mouse Shortcuts</div>
+              <div className="text-white font-bold">Keyboard & Touch Shortcuts</div>
               <div className="text-[11px] text-slate-500">Fast workflow tips</div>
             </div>
           </div>
@@ -986,10 +1041,6 @@ function ShortcutsModal({ open, onClose }) {
               </div>
             ))}
           </div>
-
-          <div className="mt-5 text-[10px] text-slate-500">
-            Tip: Mobile paste depends on browser support. Use the Paste button.
-          </div>
         </div>
       </div>
     </div>
@@ -998,6 +1049,17 @@ function ShortcutsModal({ open, onClose }) {
 
 // ===================== MAIN APP =====================
 export default function App() {
+  // Treat < lg as "mobile/small tablet"
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
+
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3400);
+  }, []);
+
   const [originalImage, setOriginalImage] = useState(null);
   const [originalFile, setOriginalFile] = useState(null);
 
@@ -1007,7 +1069,12 @@ export default function App() {
   const [processing, setProcessing] = useState(false);
   const [selectedColor, setSelectedColor] = useState('black');
   const [detectedBg, setDetectedBg] = useState(null);
-  const [viewMode, setViewMode] = useState('mockup');
+
+  // Only 2 views now: compare + mockup (png view removed)
+  const [viewMode, setViewMode] = useState('compare');
+
+  // Collapsed original on mobile after load
+  const [originalCollapsed, setOriginalCollapsed] = useState(true);
 
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [selectedPreset, setSelectedPreset] = useState('original');
@@ -1029,18 +1096,20 @@ export default function App() {
 
   const [showShortcuts, setShowShortcuts] = useState(false);
 
-  // Mobile drawer + paste fallback
+  // Mobile Settings Drawer
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
-  const pasteCatcherRef = useRef(null);
-  const [showPasteCatcher, setShowPasteCatcher] = useState(false);
 
-  // Collapsible sidebar (desktop only)
+  // Sidebar (desktop): always visible by default
+  const SIDEBAR_VER = 'pr_sidebar_open_v2';
   const [sidebarOpen, setSidebarOpen] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('pr_sidebar_open') ?? 'true'); }
-    catch { return true; }
+    try {
+      const saved = localStorage.getItem(SIDEBAR_VER);
+      if (saved == null) return true;
+      return JSON.parse(saved);
+    } catch { return true; }
   });
   useEffect(() => {
-    try { localStorage.setItem('pr_sidebar_open', JSON.stringify(sidebarOpen)); } catch { }
+    try { localStorage.setItem(SIDEBAR_VER, JSON.stringify(sidebarOpen)); } catch { }
   }, [sidebarOpen]);
 
   const fileInputRef = useRef(null);
@@ -1056,8 +1125,6 @@ export default function App() {
 
   const setOriginalUrlTracked = useObjectUrlCleanup();
   const setCutoutUrlTracked = useObjectUrlCleanup();
-
-  const [toast, setToast] = useState('');
 
   const shirtColors = {
     dark: [
@@ -1078,9 +1145,16 @@ export default function App() {
     ]
   };
 
-  const allColors = [...shirtColors.dark, ...shirtColors.light];
-  const currentColor = allColors.find(c => c.name === selectedColor);
+  const allColors = useMemo(() => [...shirtColors.dark, ...shirtColors.light], []);
+  const currentColor = allColors.find(c => c.name === selectedColor) || allColors[0];
   const isLightShirt = shirtColors.light.some(c => c.name === selectedColor);
+
+  const orderedMobileColors = useMemo(() => {
+    // light first if current shirt light, else dark first
+    return isLightShirt
+      ? [...shirtColors.light, ...shirtColors.dark]
+      : [...shirtColors.dark, ...shirtColors.light];
+  }, [isLightShirt, shirtColors.dark, shirtColors.light]);
 
   const cssFilters = useMemo(() => getCssFilters(podSettings), [podSettings]);
 
@@ -1090,14 +1164,35 @@ export default function App() {
     } catch { }
   };
 
-  // Desktop layout stays "great": only from lg and up.
-  // Small tablets (md) behave like mobile.
-  const isDesktopLayout = useMemo(() => {
-    if (typeof window === 'undefined') return true;
-    return window.matchMedia?.('(min-width: 1024px)')?.matches ?? true; // lg+
-  }, []);
+  const workspaceLoaded = !!originalImage;
 
-  // ========= Upload handler (ONE TIME cutout) =========
+  // ===================== INPUT: PASTE (button) =====================
+  const tryPasteImage = useCallback(async () => {
+    // Clipboard API read() support
+    if (!navigator.clipboard?.read) {
+      showToast('Paste not supported on this browser — use Upload.');
+      return null;
+    }
+
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const type = item.types?.find(t => t.startsWith('image/'));
+        if (type) {
+          const blob = await item.getType(type);
+          const file = new File([blob], `pasted-${Date.now()}.png`, { type });
+          return file;
+        }
+      }
+      showToast('No image found in clipboard — copy an image, then press Paste.');
+      return null;
+    } catch (e) {
+      showToast('Paste blocked by browser permissions — use Upload.');
+      return null;
+    }
+  }, [showToast]);
+
+  // ✅ Upload: process ONE TIME → cache cutout URL
   const handleFileSelect = useCallback(async (file) => {
     if (!file?.type?.startsWith('image/')) return;
 
@@ -1129,6 +1224,8 @@ export default function App() {
       });
 
       setDetectedBg(result.detectedBackground);
+
+      // Choose initial shirt color: match detected bg (white/black), but keep user can change
       setSelectedColor(result.detectedBackground === 'black' ? 'black' : 'white');
 
       const outW = targetDimensions.width > 0 ? targetDimensions.width : result.width;
@@ -1141,51 +1238,29 @@ export default function App() {
         mode: result.classification?.isLineArt ? 'line-art' : 'photo'
       });
 
-      // Default view is Compare (best UX)
+      // Default view: Compare everywhere
       setViewMode('compare');
+
+      // Mobile/tablet: collapse original by default (result-first workflow)
+      setOriginalCollapsed(true);
 
       const newCount = usageCount + 1;
       setUsageCount(newCount);
       saveUsage(newCount);
     } catch (err) {
       console.error('Cutout error:', err);
-      setToast('Failed to process image—try another file.');
+      showToast('Failed to process image. Try another file.');
     } finally {
       setProcessing(false);
     }
-  }, [isPro, usageCount, targetDimensions.width, targetDimensions.height, setOriginalUrlTracked, setCutoutUrlTracked]);
+  }, [isPro, usageCount, targetDimensions.width, targetDimensions.height, setOriginalUrlTracked, setCutoutUrlTracked, showToast]);
 
-  // ========= Paste button (desktop + mobile best-effort) =========
   const handlePasteButton = useCallback(async () => {
-    // 1) Clipboard API (best where available)
-    try {
-      if (navigator.clipboard?.read) {
-        const items = await navigator.clipboard.read();
-        for (const item of items) {
-          const type = item.types?.find(t => t.startsWith('image/'));
-          if (type) {
-            const blob = await item.getType(type);
-            const file = new File([blob], `pasted-${Date.now()}.png`, { type });
-            await handleFileSelect(file);
-            return;
-          }
-        }
-        // read succeeded but no image
-        setToast('No image found in clipboard—use Upload.');
-        return;
-      }
-    } catch {
-      // continue fallback below
-    }
+    const file = await tryPasteImage();
+    if (file) await handleFileSelect(file);
+  }, [tryPasteImage, handleFileSelect]);
 
-    // 2) If Clipboard API unsupported or blocked -> show clear message + optional catcher for Safari-like paste
-    // We keep catcher as a best-effort (some iOS Safari flows)
-    setToast('Paste not supported on this browser—use Upload.');
-    setShowPasteCatcher(true);
-    requestAnimationFrame(() => pasteCatcherRef.current?.focus());
-  }, [handleFileSelect]);
-
-  // ========= Preset switch: do NOT reprocess =========
+  // ✅ Preset switch: NO processing. Only recompute labels.
   useEffect(() => {
     if (!cutoutMeta) return;
     const outW = targetDimensions.width > 0 ? targetDimensions.width : cutoutMeta.width;
@@ -1199,50 +1274,26 @@ export default function App() {
     }));
   }, [targetDimensions.width, targetDimensions.height, cutoutMeta]);
 
-  // ========= Drag & Drop (desktop) =========
-  const [dragActive, setDragActive] = useState(false);
-  const dragDepth = useRef(0);
-
-  useEffect(() => {
-    const onDragEnter = (e) => {
-      if (!e.dataTransfer?.types?.includes('Files')) return;
-      dragDepth.current += 1;
-      setDragActive(true);
-    };
-    const onDragLeave = (e) => {
-      if (!e.dataTransfer?.types?.includes('Files')) return;
-      dragDepth.current -= 1;
-      if (dragDepth.current <= 0) {
-        dragDepth.current = 0;
-        setDragActive(false);
-      }
-    };
-    const onDragOver = (e) => {
-      if (!e.dataTransfer?.types?.includes('Files')) return;
-      e.preventDefault();
-    };
-    const onDrop = (e) => {
-      if (!e.dataTransfer?.files?.length) return;
-      e.preventDefault();
-      dragDepth.current = 0;
-      setDragActive(false);
-      handleFileSelect(e.dataTransfer.files[0]);
-    };
-
-    window.addEventListener('dragenter', onDragEnter);
-    window.addEventListener('dragleave', onDragLeave);
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('drop', onDrop);
-
-    return () => {
-      window.removeEventListener('dragenter', onDragEnter);
-      window.removeEventListener('dragleave', onDragLeave);
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('drop', onDrop);
-    };
+  // Drag & drop (landing + workspace): handle safely
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.currentTarget.classList.remove('drag-over');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) handleFileSelect(file);
   }, [handleFileSelect]);
 
-  // ========= Download: ONLY export =========
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+    // prevent mobile scroll-break while still allowing desktop drag overlay
+    e.dataTransfer.dropEffect = 'copy';
+    e.currentTarget.classList.add('drag-over');
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.currentTarget.classList.remove('drag-over');
+  }, []);
+
+  // ✅ Download: ONLY HERE do we resize + enhance + encode
   const downloadImage = useCallback(async () => {
     if (!cutoutUrl || !cutoutMeta) return;
     setProcessing(true);
@@ -1260,11 +1311,11 @@ export default function App() {
       downloadBlob(res.blob, `printready-${Date.now()}.png`);
     } catch (e) {
       console.error('Export error:', e);
-      setToast('Export failed—try again.');
+      showToast('Export failed. Try again.');
     } finally {
       setProcessing(false);
     }
-  }, [cutoutUrl, cutoutMeta, targetDimensions.width, targetDimensions.height, podSettings]);
+  }, [cutoutUrl, cutoutMeta, targetDimensions.width, targetDimensions.height, podSettings, showToast]);
 
   const resetAll = () => {
     setOriginalImage(null);
@@ -1273,14 +1324,14 @@ export default function App() {
     setCutoutMeta(null);
     setDetectedBg(null);
     setImageSize(null);
-    setViewMode('mockup');
+    setViewMode('compare');
     setSelectedPreset('original');
     setTargetDimensions({ width: 0, height: 0 });
     setCustomWidth('');
     setCustomHeight('');
     setShowCustomInput(false);
     setMobilePanelOpen(false);
-    setToast('');
+    setOriginalCollapsed(true);
   };
 
   const resetSettings = () => {
@@ -1299,11 +1350,10 @@ export default function App() {
     });
   };
 
-  // ========= Desktop clipboard paste (global) =========
+  // Desktop paste (global)
   useEffect(() => {
     const onPaste = async (e) => {
       if (isTypingTarget(document.activeElement)) return;
-
       const items = e.clipboardData?.items;
       if (items && items.length) {
         for (const it of items) {
@@ -1318,12 +1368,11 @@ export default function App() {
         }
       }
     };
-
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, [handleFileSelect]);
 
-  // ========= Keyboard shortcuts modal =========
+  // Keyboard shortcuts: ? for shortcuts, Esc closes modals/sheets
   useEffect(() => {
     const onKeyDown = (e) => {
       if (isTypingTarget(document.activeElement)) return;
@@ -1334,48 +1383,25 @@ export default function App() {
         return;
       }
 
-      // ESC closes mobile settings / modals
       if (e.key === 'Escape') {
-        if (mobilePanelOpen) setMobilePanelOpen(false);
-        if (showShortcuts) setShowShortcuts(false);
-        if (showPasteCatcher) setShowPasteCatcher(false);
+        setShowShortcuts(false);
+        setMobilePanelOpen(false);
+        setShowProModal(false);
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [mobilePanelOpen, showShortcuts, showPasteCatcher]);
+  }, []);
 
-  // ========= Mobile settings swipe down (optional, simple) =========
-  const sheetRef = useRef(null);
-  const sheetDrag = useRef({ y0: 0, dy: 0, dragging: false });
-  const [sheetOffset, setSheetOffset] = useState(0);
+  // If switching to workspace, keep Compare as default + consistent frame sizing
+  useEffect(() => {
+    if (!workspaceLoaded) return;
+    setViewMode('compare');
+  }, [workspaceLoaded]);
 
-  const onSheetPointerDown = (e) => {
-    sheetDrag.current = { y0: e.clientY, dy: 0, dragging: true };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { }
-  };
-  const onSheetPointerMove = (e) => {
-    if (!sheetDrag.current.dragging) return;
-    const dy = Math.max(0, e.clientY - sheetDrag.current.y0);
-    sheetDrag.current.dy = dy;
-    setSheetOffset(dy);
-  };
-  const onSheetPointerUp = () => {
-    if (!sheetDrag.current.dragging) return;
-    const dy = sheetDrag.current.dy;
-    sheetDrag.current.dragging = false;
-
-    if (dy > 120) {
-      setSheetOffset(0);
-      setMobilePanelOpen(false);
-      return;
-    }
-    setSheetOffset(0);
-  };
-
-  // ===================== Sidebar content (desktop sidebar + mobile sheet) =====================
-  const SidebarContent = ({ dense = false, includeColors = true }) => (
+  // ===================== SIDEBAR CONTENT (desktop) =====================
+  const SidebarContent = useCallback(({ dense = false }) => (
     <div className={`${dense ? 'space-y-5' : 'space-y-6'}`}>
       {/* Size Presets */}
       <section className="glass-panel rounded-xl p-4">
@@ -1419,7 +1445,6 @@ export default function App() {
           })}
         </div>
 
-        {/* Custom size */}
         <button
           onClick={() => {
             setShowCustomInput(!showCustomInput);
@@ -1474,44 +1499,42 @@ export default function App() {
         )}
       </section>
 
-      {/* Colors (ONLY where requested) */}
-      {includeColors && (
-        <section>
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Mockup Colors</h3>
-          <div className="mb-4">
-            <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Moon size={10} /> Dark</span>
-            <div className="grid grid-cols-6 gap-2">
-              {shirtColors.dark.map(c => (
-                <button
-                  key={c.name}
-                  onClick={() => setSelectedColor(c.name)}
-                  title={c.label}
-                  className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
-                    }`}
-                  style={{ backgroundColor: c.bg }}
-                />
-              ))}
-            </div>
+      {/* Desktop colors (only here; no duplication on mobile) */}
+      <section>
+        <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Mockup Colors</h3>
+        <div className="mb-4">
+          <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Moon size={10} /> Dark</span>
+          <div className="grid grid-cols-6 gap-2">
+            {shirtColors.dark.map(c => (
+              <button
+                key={c.name}
+                onClick={() => setSelectedColor(c.name)}
+                title={c.label}
+                className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
+                  }`}
+                style={{ backgroundColor: c.bg }}
+              />
+            ))}
           </div>
-          <div>
-            <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Sun size={10} /> Light</span>
-            <div className="grid grid-cols-6 gap-2">
-              {shirtColors.light.map(c => (
-                <button
-                  key={c.name}
-                  onClick={() => setSelectedColor(c.name)}
-                  title={c.label}
-                  className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
-                    }`}
-                  style={{ backgroundColor: c.bg }}
-                />
-              ))}
-            </div>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Sun size={10} /> Light</span>
+          <div className="grid grid-cols-6 gap-2">
+            {shirtColors.light.map(c => (
+              <button
+                key={c.name}
+                onClick={() => setSelectedColor(c.name)}
+                title={c.label}
+                className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
+                  }`}
+                style={{ backgroundColor: c.bg }}
+              />
+            ))}
           </div>
-        </section>
-      )}
+        </div>
+      </section>
 
-      {/* Print Simulation */}
+      {/* Print Simulation (desktop sidebar) */}
       <section>
         <button onClick={() => setSettingsOpen(!settingsOpen)} className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">
           <span className="flex items-center gap-2">
@@ -1543,12 +1566,12 @@ export default function App() {
                   onChange={(e) => setPodSettings(p => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
                   disabled={!originalFile}
                   className="w-full h-2 bg-slate-800 rounded-full appearance-none cursor-pointer
-                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5 
-                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500 
+                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5
+                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500
                     [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-violet-500/30
                     [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:active:cursor-grabbing
                     [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110
-                    [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full 
+                    [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full
                     [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
                   style={{ touchAction: 'none' }}
                 />
@@ -1567,526 +1590,569 @@ export default function App() {
         )}
       </section>
     </div>
+  ), [
+    MAX_DIMENSION, customHeight, customWidth, isPro, originalFile, podSettings,
+    selectedColor, selectedPreset, settingsOpen, showCustomInput, simulatePrint,
+    resetSettings, shirtColors.dark, shirtColors.light, sidebarOpen
+  ]);
+
+  // ===================== MOBILE: INLINE RESULT CONTROLS (top-notch UX) =====================
+  const MobileQuickControls = ({ compact = false }) => (
+    <div className={`glass-panel rounded-2xl p-3 ${compact ? '' : 'mt-3'}`}>
+      {/* Quick Colors (ONE place only on mobile/tablet) */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+          Quick Colors
+        </div>
+        <div className="text-[10px] text-slate-500">
+          {currentColor?.label}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 pr-1">
+        {orderedMobileColors.map(c => (
+          <button
+            key={c.name}
+            onClick={() => setSelectedColor(c.name)}
+            className={`shrink-0 w-9 h-9 rounded-xl border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-[1.03]' : 'border-white/10 hover:border-white/30'
+              }`}
+            style={{ backgroundColor: c.bg }}
+            title={c.label}
+          />
+        ))}
+      </div>
+
+      {/* Print Simulation inline (visible right here) */}
+      <div className="mt-3 border-t border-white/5 pt-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+            <Sliders size={12} className="text-violet-300" />
+            Print Simulation
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={simulatePrint}
+              className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-violet-600/20 text-violet-300 hover:bg-violet-600/30"
+            >
+              Simulate
+            </button>
+            <button
+              onClick={resetSettings}
+              className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-white/5 text-slate-300 hover:bg-white/10"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          {[
+            { label: 'Saturation', key: 'saturationReduction', min: 0.5, max: 1 },
+            { label: 'Brightness', key: 'darknessIncrease', min: 0.6, max: 1 },
+            { label: 'Contrast', key: 'contrastReduction', min: 0.7, max: 1 },
+          ].map(s => (
+            <div key={s.key}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] text-slate-300 font-medium">{s.label}</span>
+                <span className="text-[10px] font-mono text-violet-300 bg-slate-800/50 px-2 py-0.5 rounded tabular-nums">
+                  {Math.round(podSettings[s.key] * 100)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={s.min}
+                max={s.max}
+                step={0.01}
+                value={podSettings[s.key]}
+                onChange={(e) => setPodSettings(p => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
+                className="w-full h-2 bg-slate-800 rounded-full appearance-none cursor-pointer
+                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5
+                  [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500
+                  [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-violet-500/30
+                  [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:active:cursor-grabbing
+                  [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full
+                  [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
+                style={{ touchAction: 'none' }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 
-  // ===================== QUICK COLORS (MOBILE ONLY, SINGLE PLACE) =====================
-  const orderedMobileColors = useMemo(() => {
-    // show light first if current shirt is light, else dark first
-    const first = isLightShirt ? shirtColors.light : shirtColors.dark;
-    const second = isLightShirt ? shirtColors.dark : shirtColors.light;
-    return [...first, ...second];
-  }, [isLightShirt]);
+  // ===================== SETTINGS SHEET (mobile/tablet) =====================
+  const sheetRef = useRef(null);
+  const sheetDrag = useRef({ startY: 0, dy: 0, dragging: false });
 
-  const showMobileQuickColors = !isDesktopLayout && cutoutUrl && (viewMode === 'mockup' || viewMode === 'compare');
+  const onSheetPointerDown = (e) => {
+    sheetDrag.current.dragging = true;
+    sheetDrag.current.startY = e.clientY;
+    sheetDrag.current.dy = 0;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { }
+  };
+  const onSheetPointerMove = (e) => {
+    if (!sheetDrag.current.dragging) return;
+    const dy = Math.max(0, e.clientY - sheetDrag.current.startY);
+    sheetDrag.current.dy = dy;
+    if (sheetRef.current) {
+      sheetRef.current.style.transform = `translateY(${dy}px)`;
+    }
+  };
+  const onSheetPointerUp = () => {
+    sheetDrag.current.dragging = false;
+    const dy = sheetDrag.current.dy;
+    if (sheetRef.current) sheetRef.current.style.transform = '';
+    if (dy > 90) setMobilePanelOpen(false);
+  };
 
-  // ===================== Landing (DEFAULT FLOW) =====================
-  const hasImage = !!originalImage;
+  // ===================== LANDING (ONLY upload area) =====================
+  const Landing = () => (
+    <div className="min-h-[100dvh] bg-[#0c0c0f] text-slate-200 flex items-center justify-center p-4 overflow-hidden">
+      <div
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        className="max-w-2xl w-full"
+      >
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center gap-3">
+            <div className="p-2 bg-gradient-to-br from-violet-600 to-fuchsia-600 rounded-2xl shadow-lg shadow-violet-500/20">
+              <Shirt size={22} className="text-white" />
+            </div>
+            <div className="text-left">
+              <div className="text-white font-extrabold text-2xl leading-none">PrintReady</div>
+              <div className="text-violet-300 text-[11px] font-semibold">STUDIO</div>
+            </div>
+          </div>
+          <div className="text-slate-500 text-sm mt-3">Upload or paste a design — instant preview, export on download.</div>
+        </div>
 
-  // ===== Paste catcher modal (best-effort fallback) =====
-  const PasteCatcherModal = () => {
-    if (!showPasteCatcher) return null;
-    return (
-      <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-[#14141a] border border-white/10 rounded-3xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-white font-bold">Paste Image</div>
+        <div
+          onClick={() => fileInputRef.current?.click()}
+          className="glass-panel rounded-3xl p-8 sm:p-12 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center group"
+        >
+          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+          <div className="w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-5 group-hover:scale-110 transition-transform duration-300">
+            <Upload className="text-violet-400" size={38} />
+          </div>
+          <h2 className="text-2xl sm:text-3xl font-bold text-white mb-2">Drop your design here</h2>
+          <p className="text-slate-400 text-base">PNG, JPG, or WebP • Black or white background</p>
+          <p className="text-slate-500 text-sm mt-2">Desktop: Ctrl/⌘+V works. Mobile: use Paste button.</p>
+
+          <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
             <button
-              onClick={() => setShowPasteCatcher(false)}
-              className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
-              aria-label="Close"
+              onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+              className="px-7 py-3 rounded-2xl bg-violet-600 hover:bg-violet-500 text-white font-bold shadow-lg shadow-violet-900/30"
             >
-              <X size={18} />
+              Upload
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); handlePasteButton(); }}
+              className="px-7 py-3 rounded-2xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold border border-white/10"
+            >
+              Paste
             </button>
           </div>
 
-          <p className="text-sm text-slate-400 mb-3">
-            Tap the box, then choose Paste (if your browser supports it).
-          </p>
-
-          <textarea
-            ref={pasteCatcherRef}
-            className="w-full h-28 rounded-2xl bg-slate-900/60 border border-white/10 p-3 text-slate-200 focus:outline-none focus:border-violet-500"
-            placeholder="Tap here → Paste"
-            onPaste={(e) => {
-              const items = e.clipboardData?.items;
-              if (!items) return;
-
-              for (const it of items) {
-                if (it.type?.startsWith('image/')) {
-                  const file = it.getAsFile();
-                  if (file) {
-                    e.preventDefault();
-                    setShowPasteCatcher(false);
-                    handleFileSelect(file);
-                    return;
-                  }
-                }
-              }
-              setToast('No image found—use Upload.');
-            }}
-          />
-        </div>
-      </div>
-    );
-  };
-
-  // ===================== Drag overlay =====================
-  const DragOverlay = () => {
-    if (!dragActive) return null;
-    return (
-      <div className="fixed inset-0 z-[70] bg-violet-600/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
-        <div className="bg-black/60 border border-violet-400/30 rounded-3xl px-8 py-6 shadow-2xl">
-          <div className="flex items-center gap-3 text-white">
-            <div className="w-12 h-12 rounded-2xl bg-violet-500/15 border border-violet-500/20 flex items-center justify-center">
-              <Upload size={22} className="text-violet-300" />
-            </div>
-            <div>
-              <div className="font-bold text-lg">Drop to upload</div>
-              <div className="text-slate-300 text-sm">Cutout will run once and cache</div>
-            </div>
+          <div className="mt-7 flex flex-wrap items-center justify-center gap-5 text-sm text-slate-500">
+            <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> One-time cutout</span>
+            <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Instant preview</span>
+            <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Export enhancement</span>
           </div>
         </div>
       </div>
-    );
-  };
+    </div>
+  );
 
-  // ===================== UI =====================
-  return (
-    <div className="h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
-      <style>{`
-        .transparency-grid {
-          background-image: 
-            linear-gradient(45deg, #1a1a1f 25%, transparent 25%),
-            linear-gradient(-45deg, #1a1a1f 25%, transparent 25%),
-            linear-gradient(45deg, transparent 75%, #1a1a1f 75%),
-            linear-gradient(-45deg, transparent 75%, #1a1a1f 75%);
-          background-size: 16px 16px;
-          background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
-          background-color: #121215;
-        }
-        .fabric-texture {
-          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-          background-blend-mode: soft-light;
-        }
-        .glass-panel { background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.05); }
-      `}</style>
-
-      <Toast message={toast} onClose={() => setToast('')} />
-      <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
-      <PasteCatcherModal />
-      <DragOverlay />
-
-      {/* Header */}
-      <header className="h-14 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-20 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-gradient-to-br from-violet-600 to-fuchsia-600 rounded-xl shadow-lg shadow-violet-500/20">
-            <Shirt size={18} className="text-white" />
-          </div>
-          <div>
-            <span className="font-bold tracking-tight text-white text-lg">PrintReady</span>
-            <span className="text-violet-400 text-[10px] font-semibold ml-2 bg-violet-500/10 px-2 py-0.5 rounded-full">STUDIO</span>
-          </div>
+  // ===================== WORKSPACE HEADER =====================
+  const WorkspaceHeader = () => (
+    <header className="h-14 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-30 shrink-0">
+      <div className="flex items-center gap-3">
+        <div className="p-2 bg-gradient-to-br from-violet-600 to-fuchsia-600 rounded-xl shadow-lg shadow-violet-500/20">
+          <Shirt size={18} className="text-white" />
         </div>
+        <div>
+          <span className="font-bold tracking-tight text-white text-lg">PrintReady</span>
+          <span className="text-violet-400 text-[10px] font-semibold ml-2 bg-violet-500/10 px-2 py-0.5 rounded-full">STUDIO</span>
+        </div>
+      </div>
 
-        <div className="flex items-center gap-2 sm:gap-3">
-          {detectedBg && hasImage && (
-            <span className={`hidden sm:flex text-xs px-2 py-1 rounded-full font-medium items-center gap-1.5 ${detectedBg === 'black' ? 'bg-slate-800 text-slate-300' : 'bg-white/10 text-white'}`}>
-              {detectedBg === 'black' ? <Moon size={12} /> : <Sun size={12} />}
-              {detectedBg} bg
-            </span>
-          )}
-          {cutoutMeta?.classification && hasImage && (
-            <span className="hidden sm:inline-flex text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
-              {cutoutMeta.classification.isLineArt ? 'line-art' : 'photo'}
-            </span>
-          )}
+      <div className="flex items-center gap-2 sm:gap-3">
+        {detectedBg && isDesktop && (
+          <span className={`hidden lg:flex text-xs px-2 py-1 rounded-full font-medium items-center gap-1.5 ${detectedBg === 'black' ? 'bg-slate-800 text-slate-300' : 'bg-white/10 text-white'}`}>
+            {detectedBg === 'black' ? <Moon size={12} /> : <Sun size={12} />}
+            {detectedBg} bg
+          </span>
+        )}
 
-          {/* Desktop/tablet: sidebar toggle (lg+) */}
-          <button
-            onClick={() => setSidebarOpen(s => !s)}
-            className="hidden lg:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
-            title={sidebarOpen ? "Hide panel" : "Show panel"}
-          >
-            <Sliders size={14} className="text-violet-300" />
-            {sidebarOpen ? "Hide" : "Show"}
-          </button>
+        <button
+          onClick={() => setShowShortcuts(true)}
+          className="hidden sm:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
+          title="Shortcuts ( ? )"
+        >
+          <HelpCircle size={14} className="text-violet-300" />
+          Shortcuts
+        </button>
 
-          {/* Paste button (always visible when landing/workspace) */}
+        {/* Desktop paste */}
+        {isDesktop && (
           <button
             onClick={handlePasteButton}
-            className="hidden sm:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
+            className="hidden lg:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
             title="Paste image"
           >
             <Upload size={14} className="text-violet-300" />
             Paste
           </button>
+        )}
 
-          <button
-            onClick={() => setShowShortcuts(true)}
-            className="hidden sm:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
-            title="Shortcuts ( ? )"
-          >
-            <HelpCircle size={14} className="text-violet-300" />
-            Shortcuts
-          </button>
+        {!isPro && isDesktop && <span className="hidden lg:inline text-xs text-slate-500">{Math.max(0, FREE_LIMIT - usageCount)} free left</span>}
 
-          {!isPro && <span className="hidden sm:inline text-xs text-slate-500">{Math.max(0, FREE_LIMIT - usageCount)} free left</span>}
-          <button onClick={() => isPro ? setIsPro(false) : setShowProModal(true)} className={`px-3 sm:px-4 py-1.5 rounded-full text-xs font-bold transition-all ${isPro ? 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-lg shadow-orange-500/20' : 'bg-violet-600 hover:bg-violet-500 text-white'}`}>
-            {isPro ? <span className="flex items-center gap-1.5"><Crown size={12} /> PRO</span> : 'Upgrade'}
-          </button>
+        <button
+          onClick={() => isPro ? setIsPro(false) : setShowProModal(true)}
+          className={`px-3 sm:px-4 py-1.5 rounded-full text-xs font-bold transition-all ${isPro ? 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-lg shadow-orange-500/20' : 'bg-violet-600 hover:bg-violet-500 text-white'}`}
+        >
+          {isPro ? <span className="flex items-center gap-1.5"><Crown size={12} /> PRO</span> : 'Upgrade'}
+        </button>
+      </div>
+    </header>
+  );
+
+  // ===================== VIEW SWITCH =====================
+  const ViewTabs = () => (
+    <div className="mt-3 flex gap-2">
+      {[
+        { mode: 'compare', icon: SplitSquareHorizontal, label: 'Compare' },
+        { mode: 'mockup', icon: Shirt, label: 'Mockup' },
+      ].map(({ mode, icon: Icon, label }) => (
+        <button
+          key={mode}
+          onClick={() => setViewMode(mode)}
+          className={`flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${viewMode === mode
+            ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
+            : 'bg-white/5 hover:bg-white/10 text-slate-400'
+            }`}
+        >
+          <Icon size={18} /> {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  // ===================== RESULT FRAME (same size for compare & mockup) =====================
+  const ResultFrame = ({ children }) => (
+    <div
+      className={`flex-1 rounded-2xl overflow-hidden relative min-h-[320px] ${viewMode === 'mockup' || viewMode === 'compare'
+        ? 'fabric-texture'
+        : 'transparency-grid'
+        }`}
+      style={{
+        backgroundColor: (viewMode === 'mockup' || viewMode === 'compare') ? currentColor?.bg : undefined
+      }}
+    >
+      {/* collar hint */}
+      {(viewMode === 'mockup' || viewMode === 'compare') && (
+        <div
+          className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px] z-10"
+          style={{ borderColor: isLightShirt ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.10)' }}
+        />
+      )}
+
+      {children}
+
+      {/* size badge */}
+      {imageSize && !processing && (
+        <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-300 z-20">
+          {imageSize.output}
         </div>
-      </header>
+      )}
+    </div>
+  );
 
-      {/* Pro Modal */}
-      {showProModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#14141a] rounded-3xl p-8 max-w-md w-full border border-white/10 shadow-2xl">
-            <div className="text-center">
-              <div className="w-16 h-16 bg-gradient-to-br from-amber-500 to-orange-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                <Crown size={32} className="text-white" />
-              </div>
-              <h2 className="text-2xl font-bold text-white mb-2">Upgrade to Pro</h2>
-              <p className="text-slate-400 mb-6">You've used your {FREE_LIMIT} free designs today.</p>
+  // ===================== WORKSPACE =====================
+  const WorkspaceDesktop = () => (
+    <div className="flex-1 flex overflow-hidden">
+      <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6">
+        <div className="h-full grid grid-cols-2 gap-4 lg:gap-6 overflow-hidden">
+          {/* LEFT: Original */}
+          <div className="min-w-0 flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
+              <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"><X size={16} /></button>
+            </div>
 
-              <div className="bg-slate-800/50 rounded-2xl p-6 mb-6 text-left">
-                <h3 className="font-semibold text-white mb-4">Pro includes:</h3>
-                <ul className="space-y-3 text-sm">
-                  {['Unlimited designs', '2× and 4× export enhancement', 'No watermark', 'Advanced controls', 'Priority support'].map((f, i) => (
-                    <li key={i} className="flex items-center gap-2 text-slate-300">
-                      <Check size={16} className="text-emerald-500" />{f}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            <div className="flex-1 transparency-grid rounded-2xl overflow-hidden relative min-h-[320px]">
+              <VirtualCanvasFrame
+                targetW={targetDimensions.width}
+                targetH={targetDimensions.height}
+                fallbackW={cutoutMeta?.width}
+                fallbackH={cutoutMeta?.height}
+              >
+                <ZoomableImage
+                  src={originalImage}
+                  alt="Original"
+                  className="w-full h-full object-contain drop-shadow-2xl"
+                  containerClassName="w-full h-full flex items-center justify-center"
+                  defaultZoom={1.05}
+                />
+              </VirtualCanvasFrame>
 
-              <button onClick={() => { setIsPro(true); setShowProModal(false); }} className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3">
-                Go Pro — $9/month
+              {imageSize && <div className="absolute bottom-3 right-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-300 z-20">{imageSize.original}</div>}
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button onClick={() => fileInputRef.current?.click()} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                <Upload size={16} /> Upload
               </button>
-              <button onClick={() => setShowProModal(false)} className="w-full py-3 text-slate-500 hover:text-slate-300 text-sm">Maybe later</button>
+              <button onClick={handlePasteButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                <Upload size={16} /> Paste
+              </button>
+            </div>
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+          </div>
+
+          {/* RIGHT: Result */}
+          <div className="min-w-0 flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+                Result
+              </h3>
+              <div className="flex items-center gap-2">
+                {cutoutMeta?.classification && (
+                  <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">
+                    {cutoutMeta.classification.isLineArt ? 'line-art auto' : 'photo auto'}
+                  </span>
+                )}
+                <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">
+                  {currentColor?.label}
+                </span>
+              </div>
+            </div>
+
+            <ResultFrame>
+              {processing ? (
+                <div className="w-full h-full flex items-center justify-center">
+                  <div className="text-center">
+                    <RefreshCw className="animate-spin text-violet-500 mx-auto mb-4" size={48} />
+                    <p className="text-base text-slate-300">Working…</p>
+                  </div>
+                </div>
+              ) : cutoutUrl ? (
+                <VirtualCanvasFrame
+                  targetW={targetDimensions.width}
+                  targetH={targetDimensions.height}
+                  fallbackW={cutoutMeta?.width}
+                  fallbackH={cutoutMeta?.height}
+                >
+                  {viewMode === 'compare' ? (
+                    <CompareView
+                      beforeSrc={originalImage}
+                      afterSrc={cutoutUrl}
+                      afterStyle={cssFilters}
+                      defaultZoom={1.22}
+                      defaultPos={54}
+                      backgroundColor={currentColor?.bg}
+                      showFabric={true}
+                    />
+                  ) : (
+                    <ZoomableImage
+                      src={cutoutUrl}
+                      alt="Mockup"
+                      className="w-full h-full object-contain drop-shadow-2xl"
+                      containerClassName="w-full h-full flex items-center justify-center"
+                      style={cssFilters}
+                      defaultZoom={1.05}
+                      hint={false}
+                    />
+                  )}
+                </VirtualCanvasFrame>
+              ) : null}
+
+              {!processing && cutoutUrl && (
+                <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
+                  <Sparkles size={10} className="text-amber-400" />
+                  {viewMode === 'compare' ? 'Compare' : 'POD Preview'}
+                </div>
+              )}
+            </ResultFrame>
+
+            <ViewTabs />
+
+            {/* Desktop: keep everything “directly there” too */}
+            <div className="mt-3">
+              <MobileQuickControls compact />
             </div>
           </div>
         </div>
-      )}
+      </main>
 
-      {/* MAIN */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* LANDING ONLY (default flow) */}
-        {!hasImage ? (
-          <main className="flex-1 overflow-auto px-4 py-8 sm:px-6 lg:px-10">
-            <div className="min-h-[calc(100dvh-56px)] flex items-center justify-center">
-              <div className="max-w-2xl w-full">
-                <div
-                  onClick={() => fileInputRef.current?.click()}
-                  className="glass-panel rounded-3xl p-8 sm:p-12 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center"
-                >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => handleFileSelect(e.target.files[0])}
-                  />
+      {/* Desktop Sidebar (always visible by default) */}
+      <aside
+        className={`hidden lg:flex border-l border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl flex-col shrink-0 transition-all duration-200 ease-out ${sidebarOpen ? 'w-[360px]' : 'w-[72px]'}`}
+      >
+        <div className="p-3 border-b border-white/5 flex items-center justify-between">
+          <div className={`text-xs font-bold text-white/80 ${sidebarOpen ? '' : 'hidden'}`}>
+            Controls
+          </div>
+          <button
+            onClick={() => setSidebarOpen(s => !s)}
+            className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
+            title={sidebarOpen ? "Collapse" : "Expand"}
+          >
+            <ChevronDown size={16} className={`transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
+          </button>
+        </div>
 
-                  <div className="w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-6">
-                    <Upload className="text-violet-400" size={40} />
-                  </div>
+        <div className={`p-5 overflow-y-auto flex-1 ${sidebarOpen ? '' : 'px-2'}`}>
+          {sidebarOpen ? (
+            <SidebarContent />
+          ) : (
+            <div className="flex flex-col items-center gap-2 pt-2">
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
+                title="Open panel"
+              >
+                <Sliders size={18} className="text-violet-300" />
+              </button>
 
-                  <h2 className="text-2xl sm:text-3xl font-bold text-white mb-2">Upload your design</h2>
-                  <p className="text-slate-400 text-base mb-6">PNG, JPG, or WebP • Black or white background</p>
+              <button
+                onClick={downloadImage}
+                disabled={!cutoutUrl || processing}
+                className="w-12 h-12 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 flex items-center justify-center"
+                title="Download PNG"
+              >
+                <Download size={18} className="text-white" />
+              </button>
 
-                  <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
-                      className="px-6 py-3.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-base transition"
-                    >
-                      Upload
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handlePasteButton(); }}
-                      className="px-6 py-3.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-semibold text-base transition"
-                    >
-                      Paste
-                    </button>
-                  </div>
-
-                  <div className="mt-6 text-sm text-slate-500">
-                    Desktop: Ctrl/⌘+V works • Mobile: Paste depends on browser support
-                  </div>
-
-                  <div className="mt-8 flex flex-wrap items-center justify-center gap-5 text-sm text-slate-500">
-                    <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Instant preview</span>
-                    <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> One-time cutout</span>
-                    <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Export enhancement</span>
-                  </div>
-                </div>
-
-                <div className="mt-4 text-center text-[11px] text-slate-600">
-                  Drag & drop works on desktop. On mobile, use Upload.
-                </div>
-              </div>
+              <button
+                onClick={handlePasteButton}
+                className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
+                title="Paste"
+              >
+                <Upload size={18} className="text-violet-300" />
+              </button>
             </div>
-          </main>
-        ) : (
-          <>
-            {/* WORKSPACE */}
-            <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6">
-              {/* Desktop: two columns from lg+. Mobile/tablet: stacked */}
-              <div className="h-full grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4 lg:gap-6 overflow-hidden">
-                {/* ORIGINAL */}
-                <section className="min-w-0 flex flex-col overflow-hidden">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
-                    <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all" title="Reset">
-                      <X size={16} />
-                    </button>
-                  </div>
+          )}
+        </div>
 
-                  <div className="flex-1 transparency-grid rounded-2xl overflow-hidden relative min-h-[280px]">
-                    <VirtualCanvasFrame
-                      targetW={targetDimensions.width}
-                      targetH={targetDimensions.height}
-                      fallbackW={cutoutMeta?.width}
-                      fallbackH={cutoutMeta?.height}
-                    >
-                      <ZoomableImage
-                        src={originalImage}
-                        alt="Original"
-                        className="w-full h-full object-contain drop-shadow-2xl"
-                        containerClassName="w-full h-full flex items-center justify-center"
-                        defaultZoom={1.08}
-                      />
-                    </VirtualCanvasFrame>
-
-                    {imageSize && <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 z-20">{imageSize.original}</div>}
-                  </div>
-
-                  {/* Quick actions below original (mobile/tablet helpful) */}
-                  <div className="mt-3 grid grid-cols-2 gap-2 lg:hidden">
-                    <button onClick={() => fileInputRef.current?.click()} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
-                      <Upload size={16} /> Upload
-                    </button>
-                    <button onClick={handlePasteButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
-                      <Upload size={16} /> Paste
-                    </button>
-                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
-                  </div>
-                </section>
-
-                {/* RESULT */}
-                <section className="min-w-0 flex flex-col overflow-hidden">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
-                      {viewMode === 'mockup' ? 'Mockup' : viewMode === 'png' ? 'Cutout PNG' : 'Compare'}
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      {cutoutMeta && (
-                        <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">
-                          {cutoutMeta.classification?.isLineArt ? 'line-art auto' : 'photo auto'}
-                        </span>
-                      )}
-                      {cutoutUrl && <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>}
-                    </div>
-                  </div>
-
-                  <div
-                    className={`flex-1 rounded-2xl overflow-hidden relative min-h-[280px] ${viewMode === 'mockup' ? 'fabric-texture' : 'transparency-grid'
-                      }`}
-                    style={{ backgroundColor: viewMode === 'mockup' ? currentColor?.bg : undefined }}
-                  >
-                    {viewMode === 'mockup' && (
-                      <div
-                        className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px]"
-                        style={{ borderColor: isLightShirt ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.1)' }}
-                      />
-                    )}
-
-                    {processing ? (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <div className="text-center">
-                          <RefreshCw className="animate-spin text-violet-500 mx-auto mb-4" size={48} />
-                          <p className="text-base text-slate-300">Working…</p>
-                        </div>
-                      </div>
-                    ) : cutoutUrl ? (
-                      viewMode === 'compare' ? (
-                        <div className="absolute inset-0" style={{ backgroundColor: currentColor?.bg }}>
-                          <CompareView
-                            beforeSrc={originalImage}
-                            afterSrc={cutoutUrl}
-                            afterStyle={cssFilters}
-                            defaultZoom={1.38}
-                            mobileDefaultZoom={1.26}
-                          />
-                        </div>
-                      ) : (
-                        <VirtualCanvasFrame
-                          targetW={targetDimensions.width}
-                          targetH={targetDimensions.height}
-                          fallbackW={cutoutMeta?.width}
-                          fallbackH={cutoutMeta?.height}
-                        >
-                          <ZoomableImage
-                            src={cutoutUrl}
-                            alt="Cutout"
-                            className="w-full h-full object-contain drop-shadow-2xl"
-                            containerClassName="w-full h-full flex items-center justify-center"
-                            style={cssFilters}
-                            defaultZoom={1.08}
-                          />
-                        </VirtualCanvasFrame>
-                      )
-                    ) : null}
-
-                    {cutoutUrl && !processing && viewMode !== 'compare' && (
-                      <>
-                        <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
-                          <Sparkles size={10} className="text-amber-400" />
-                          {viewMode === 'mockup' ? 'POD Preview' : 'Transparent Cutout'}
-                        </div>
-
-                        {imageSize && (
-                          <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 flex items-center gap-1 z-20">
-                            {(targetDimensions.width > 0 || targetDimensions.height > 0) && <Maximize2 size={10} />}
-                            {imageSize.output}
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-
-                  {/* View switch */}
-                  <div className="mt-3 flex gap-2">
-                    {[
-                      { mode: 'mockup', icon: Shirt, label: 'Mockup' },
-                      { mode: 'png', icon: Layers, label: 'Cutout' },
-                      { mode: 'compare', icon: SplitSquareHorizontal, label: 'Compare' },
-                    ].map(({ mode, icon: Icon, label }) => (
-                      <button
-                        key={mode}
-                        onClick={() => setViewMode(mode)}
-                        className={`flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${viewMode === mode
-                          ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
-                          : 'bg-white/5 hover:bg-white/10 text-slate-400'
-                          }`}
-                      >
-                        <Icon size={18} /> {label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Mobile-only: SINGLE Quick Colors bar (no duplication) */}
-                  {showMobileQuickColors && (
-                    <div className="mt-3 glass-panel rounded-xl p-3 lg:hidden">
-                      <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center justify-between">
-                        <span>Quick Colors</span>
-                        <span className="text-slate-600">{currentColor?.label}</span>
-                      </div>
-                      <div className="flex items-center gap-2 overflow-x-auto pb-1 pr-1">
-                        {orderedMobileColors.map(c => (
-                          <button
-                            key={c.name}
-                            onClick={() => setSelectedColor(c.name)}
-                            className={`shrink-0 w-9 h-9 rounded-xl border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-105' : 'border-white/10 hover:border-white/30'
-                              }`}
-                            style={{ backgroundColor: c.bg }}
-                            title={c.label}
-                          />
-                        ))}
-                      </div>
-                      <div className="mt-2 text-[10px] text-slate-500">
-                        Colors stay accessible without opening Settings.
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Mobile download big button (secondary access, main is bottom bar) */}
-                  <div className="mt-3 lg:hidden">
-                    <button
-                      onClick={downloadImage}
-                      disabled={!cutoutUrl || processing}
-                      className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
-                    >
-                      <Download size={20} /> Download PNG
-                    </button>
-                    <p className="text-[10px] text-center text-slate-600 mt-2">
-                      {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
-                    </p>
-                  </div>
-                </section>
-              </div>
-            </main>
-
-            {/* Desktop Sidebar (lg+) ALWAYS visible like before */}
-            <aside
-              className={`hidden lg:flex border-l border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl flex-col shrink-0 transition-all duration-200 ease-out
-              ${sidebarOpen ? 'w-[360px]' : 'w-[72px]'}`}
+        {sidebarOpen && (
+          <div className="p-5 bg-[#08080a] border-t border-white/5">
+            <button
+              onClick={downloadImage}
+              disabled={!cutoutUrl || processing}
+              className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
             >
-              <div className="p-3 border-b border-white/5 flex items-center justify-between">
-                <div className={`text-xs font-bold text-white/80 ${sidebarOpen ? '' : 'hidden'}`}>
-                  Controls
-                </div>
-                <button
-                  onClick={() => setSidebarOpen(s => !s)}
-                  className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
-                  title={sidebarOpen ? "Collapse" : "Expand"}
-                >
-                  <ChevronDown size={16} className={`transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
-                </button>
-              </div>
-
-              <div className={`p-5 overflow-y-auto flex-1 ${sidebarOpen ? '' : 'px-2'}`}>
-                {sidebarOpen ? (
-                  <SidebarContent includeColors={true} />
-                ) : (
-                  <div className="flex flex-col items-center gap-2 pt-2">
-                    <button
-                      onClick={() => setSidebarOpen(true)}
-                      className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
-                      title="Open panel"
-                    >
-                      <Sliders size={18} className="text-violet-300" />
-                    </button>
-
-                    <button
-                      onClick={downloadImage}
-                      disabled={!cutoutUrl || processing}
-                      className="w-12 h-12 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 flex items-center justify-center"
-                      title="Download PNG"
-                    >
-                      <Download size={18} className="text-white" />
-                    </button>
-
-                    <button
-                      onClick={handlePasteButton}
-                      className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
-                      title="Paste"
-                    >
-                      <Upload size={18} className="text-violet-300" />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {sidebarOpen && (
-                <div className="p-5 bg-[#08080a] border-t border-white/5">
-                  <button
-                    onClick={downloadImage}
-                    disabled={!cutoutUrl || processing}
-                    className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
-                  >
-                    <Download size={20} /> Download PNG
-                  </button>
-                  <p className="text-[10px] text-center text-slate-600 mt-3">
-                    {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
-                  </p>
-                </div>
-              )}
-            </aside>
-          </>
+              <Download size={20} /> Download PNG
+            </button>
+            <p className="text-[10px] text-center text-slate-600 mt-3">
+              {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
+            </p>
+          </div>
         )}
-      </div>
+      </aside>
+    </div>
+  );
 
-      {/* Mobile Settings Drawer (bottom sheet) */}
+  const WorkspaceMobile = () => (
+    <div className="flex-1 overflow-hidden">
+      <main className="h-full overflow-y-auto px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+92px)]">
+        {/* RESULT FIRST (top-notch workflow) */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+              Result
+            </h3>
+            <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"><X size={16} /></button>
+          </div>
+
+          <ResultFrame>
+            {processing ? (
+              <div className="w-full h-full flex items-center justify-center">
+                <div className="text-center">
+                  <RefreshCw className="animate-spin text-violet-500 mx-auto mb-4" size={44} />
+                  <p className="text-base text-slate-300">Working…</p>
+                </div>
+              </div>
+            ) : cutoutUrl ? (
+              <VirtualCanvasFrame
+                targetW={targetDimensions.width}
+                targetH={targetDimensions.height}
+                fallbackW={cutoutMeta?.width}
+                fallbackH={cutoutMeta?.height}
+              >
+                {viewMode === 'compare' ? (
+                  <CompareView
+                    beforeSrc={originalImage}
+                    afterSrc={cutoutUrl}
+                    afterStyle={cssFilters}
+                    defaultZoom={1.15}   // slightly smaller on mobile so controls + colors feel easy
+                    defaultPos={55}
+                    backgroundColor={currentColor?.bg}
+                    showFabric={true}
+                  />
+                ) : (
+                  <ZoomableImage
+                    src={cutoutUrl}
+                    alt="Mockup"
+                    className="w-full h-full object-contain drop-shadow-2xl"
+                    containerClassName="w-full h-full flex items-center justify-center"
+                    style={cssFilters}
+                    defaultZoom={1.05}
+                    hint={false}
+                  />
+                )}
+              </VirtualCanvasFrame>
+            ) : null}
+
+            {!processing && cutoutUrl && (
+              <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
+                <Sparkles size={10} className="text-amber-400" />
+                {viewMode === 'compare' ? 'Compare' : 'POD Preview'}
+              </div>
+            )}
+          </ResultFrame>
+
+          <ViewTabs />
+
+          {/* ONE mobile control area: colors + print simulation (directly here) */}
+          <MobileQuickControls />
+        </div>
+
+        {/* ORIGINAL (collapsed by default after load) */}
+        <div className="mb-4">
+          <button
+            onClick={() => setOriginalCollapsed(v => !v)}
+            className="w-full flex items-center justify-between bg-white/5 hover:bg-white/10 rounded-2xl px-4 py-3"
+          >
+            <div className="text-sm font-semibold text-slate-200">Original</div>
+            <ChevronDown size={18} className={`text-slate-400 transition-transform ${originalCollapsed ? '' : 'rotate-180'}`} />
+          </button>
+
+          {!originalCollapsed && (
+            <div className="mt-3 transparency-grid rounded-2xl overflow-hidden relative min-h-[260px]">
+              <VirtualCanvasFrame
+                targetW={targetDimensions.width}
+                targetH={targetDimensions.height}
+                fallbackW={cutoutMeta?.width}
+                fallbackH={cutoutMeta?.height}
+              >
+                <ZoomableImage
+                  src={originalImage}
+                  alt="Original"
+                  className="w-full h-full object-contain drop-shadow-2xl"
+                  containerClassName="w-full h-full flex items-center justify-center"
+                  defaultZoom={1.0}
+                />
+              </VirtualCanvasFrame>
+              {imageSize && <div className="absolute bottom-3 right-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-300 z-20">{imageSize.original}</div>}
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Mobile Settings Drawer */}
       {mobilePanelOpen && (
         <div className="lg:hidden fixed inset-0 z-50">
           <div
@@ -2095,93 +2161,171 @@ export default function App() {
           />
           <div
             ref={sheetRef}
-            className="absolute bottom-0 left-0 right-0 max-h-[86dvh] rounded-t-3xl bg-[#0c0c0f] border-t border-white/10 overflow-hidden"
-            style={{ transform: `translateY(${sheetOffset}px)`, transition: sheetDrag.current.dragging ? 'none' : 'transform 180ms ease-out' }}
+            className="absolute bottom-0 left-0 right-0 max-h-[86vh] rounded-t-3xl bg-[#0c0c0f] border-t border-white/10 overflow-hidden"
           >
-            {/* grabber */}
             <div
-              className="h-7 flex items-center justify-center"
+              className="p-4 flex items-center justify-between border-b border-white/10"
               onPointerDown={onSheetPointerDown}
               onPointerMove={onSheetPointerMove}
               onPointerUp={onSheetPointerUp}
               onPointerCancel={onSheetPointerUp}
               style={{ touchAction: 'none' }}
             >
-              <div className="w-12 h-1.5 rounded-full bg-white/15" />
-            </div>
-
-            <div className="px-4 pb-3 flex items-center justify-between border-b border-white/10">
-              <div className="text-white font-bold">Settings</div>
+              <div className="flex items-center gap-2">
+                <div className="w-10 h-1.5 rounded-full bg-white/10" />
+                <div className="text-white font-bold ml-2">Settings</div>
+              </div>
               <button
                 onClick={() => setMobilePanelOpen(false)}
                 className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
-                aria-label="Close"
               >
                 <X size={18} />
               </button>
             </div>
 
             <div className="p-4 overflow-y-auto">
-              {/* IMPORTANT: mobile should NOT show swatches twice.
-                  So settings on mobile: presets + simulation only (no colors). */}
-              <SidebarContent dense includeColors={false} />
-            </div>
-
-            <div className="p-4 border-t border-white/10 bg-[#08080a]" style={{ paddingBottom: 'calc(16px + env(safe-area-inset-bottom))' }}>
-              <button
-                onClick={() => { setMobilePanelOpen(false); downloadImage(); }}
-                disabled={!cutoutUrl || processing}
-                className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2"
-              >
-                <Download size={18} /> Download PNG
-              </button>
+              {/* Settings includes: presets + download access (simulation already inline above) */}
+              <SidebarContent dense />
+              <div className="mt-4">
+                <button
+                  onClick={() => { setMobilePanelOpen(false); downloadImage(); }}
+                  disabled={!cutoutUrl || processing}
+                  className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2"
+                >
+                  <Download size={18} /> Download PNG
+                </button>
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Mobile Bottom Bar (only when image loaded) */}
-      {hasImage && (
-        <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/90 backdrop-blur-xl"
-          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-        >
-          <div className="p-2 flex items-center gap-2">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm"
-            >
-              Upload
-            </button>
+      {/* Mobile Bottom Bar */}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/90 backdrop-blur-xl safe-bottom">
+        <div className="p-2 flex items-center gap-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm"
+          >
+            Upload
+          </button>
 
-            <button
-              onClick={handlePasteButton}
-              className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
-            >
-              Paste
-            </button>
+          <button
+            onClick={handlePasteButton}
+            className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
+          >
+            Paste
+          </button>
 
-            <button
-              onClick={() => setMobilePanelOpen(true)}
-              className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
-            >
-              Settings
-            </button>
+          <button
+            onClick={() => setMobilePanelOpen(true)}
+            className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
+          >
+            Settings
+          </button>
 
-            <button
-              onClick={downloadImage}
-              disabled={!cutoutUrl || processing}
-              className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40"
-            >
-              PNG
-            </button>
-          </div>
-          {/* Spacer input */}
-          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+          <button
+            onClick={downloadImage}
+            disabled={!cutoutUrl || processing}
+            className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40"
+          >
+            PNG
+          </button>
         </div>
-      )}
+      </div>
 
-      {/* Spacer so content won't hide behind bottom bar */}
-      {hasImage && <div className="lg:hidden h-20" />}
+      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+    </div>
+  );
+
+  // ===================== PRO MODAL =====================
+  const ProModal = () => (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-[#14141a] rounded-3xl p-8 max-w-md w-full border border-white/10 shadow-2xl">
+        <div className="text-center">
+          <div className="w-16 h-16 bg-gradient-to-br from-amber-500 to-orange-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
+            <Crown size={32} className="text-white" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Upgrade to Pro</h2>
+          <p className="text-slate-400 mb-6">You've used your {FREE_LIMIT} free designs today.</p>
+
+          <div className="bg-slate-800/50 rounded-2xl p-6 mb-6 text-left">
+            <h3 className="font-semibold text-white mb-4">Pro includes:</h3>
+            <ul className="space-y-3 text-sm">
+              {['Unlimited designs', '2× and 4× export enhancement', 'No watermark', 'Advanced controls', 'Priority support'].map((f, i) => (
+                <li key={i} className="flex items-center gap-2 text-slate-300">
+                  <Check size={16} className="text-emerald-500" />{f}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <button onClick={() => { setIsPro(true); setShowProModal(false); }} className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3">
+            Go Pro — $9/month
+          </button>
+          <button onClick={() => setShowProModal(false)} className="w-full py-3 text-slate-500 hover:text-slate-300 text-sm">Maybe later</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ===================== MAIN RENDER =====================
+  if (!workspaceLoaded) {
+    return (
+      <>
+        <style>{`
+          .transparency-grid {
+            background-image:
+              linear-gradient(45deg, #1a1a1f 25%, transparent 25%),
+              linear-gradient(-45deg, #1a1a1f 25%, transparent 25%),
+              linear-gradient(45deg, transparent 75%, #1a1a1f 75%),
+              linear-gradient(-45deg, transparent 75%, #1a1a1f 75%);
+            background-size: 16px 16px;
+            background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+            background-color: #121215;
+          }
+          .drag-over { border-color: rgb(139 92 246) !important; background: rgba(139, 92, 246, 0.08) !important; }
+          .fabric-texture {
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+            background-blend-mode: soft-light;
+          }
+          .glass-panel { background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        `}</style>
+        <Toast toast={toast} onClose={() => setToast(null)} />
+        <Landing />
+      </>
+    );
+  }
+
+  return (
+    <div className="min-h-[100dvh] h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
+      <style>{`
+        .transparency-grid {
+          background-image:
+            linear-gradient(45deg, #1a1a1f 25%, transparent 25%),
+            linear-gradient(-45deg, #1a1a1f 25%, transparent 25%),
+            linear-gradient(45deg, transparent 75%, #1a1a1f 75%),
+            linear-gradient(-45deg, transparent 75%, #1a1a1f 75%);
+          background-size: 16px 16px;
+          background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+          background-color: #121215;
+        }
+        .drag-over { border-color: rgb(139 92 246) !important; background: rgba(139, 92, 246, 0.08) !important; }
+        .fabric-texture {
+          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+          background-blend-mode: soft-light;
+        }
+        .glass-panel { background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.05); }
+      `}</style>
+
+      <Toast toast={toast} onClose={() => setToast(null)} />
+      <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {showProModal && <ProModal />}
+
+      <WorkspaceHeader />
+
+      {isDesktop ? <WorkspaceDesktop /> : <WorkspaceMobile />}
     </div>
   );
 }

@@ -2,96 +2,28 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+:root {
+  color-scheme: dark;
 }
 
-::-webkit-scrollbar-track {
-  background: #1e293b;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
-}
-
-/* Smooth transitions */
-* {
-  scroll-behavior: smooth;
-}
-
-/* Range input styling */
-input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-input[type="range"]::-webkit-slider-track {
-  background: #334155;
-  height: 8px;
-  border-radius: 4px;
-}
-
-input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  margin-top: -4px;
-  background-color: #8b5cf6;
-  height: 16px;
-  width: 16px;
-  border-radius: 50%;
-  transition: background-color 0.15s ease;
-}
-
-input[type="range"]::-webkit-slider-thumb:hover {
-  background-color: #a78bfa;
-}
-
-/* Realistic Fabric Texture Overlay */
-.fabric-texture {
-  position: relative;
-}
-
-.fabric-texture::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
+html,
+body,
+#root {
   height: 100%;
-  opacity: 0.15;
-  pointer-events: none;
-  background-image: url("https://www.transparenttextures.com/patterns/carbon-fibre.png");
-  mix-blend-mode: overlay;
 }
 
-/* Glassmorphism for panels */
-.glass-panel {
-  @apply bg-slate-900/40 backdrop-blur-xl border border-white/5 shadow-2xl;
+body {
+  margin: 0;
+  background: #0c0c0f;
+  overscroll-behavior: none;
 }
 
-/* Studio Canvas Background */
-.studio-canvas {
-  background-color: #0f172a;
-  background-image:
-    radial-gradient(circle at 2px 2px, rgba(255, 255, 255, 0.05) 1px, transparent 0);
-  background-size: 32px 32px;
+/* Helps avoid “cut off” on mobile dynamic bars */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* Checkbox pattern for transparency */
-.transparency-grid {
-  background-image:
-    linear-gradient(45deg, #374151 25%, transparent 25%),
-    linear-gradient(-45deg, #374151 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #374151 75%),
-    linear-gradient(-45deg, transparent 75%, #374151 75%);
-  background-size: 20px 20px;
+/* Make touch interactions nicer */
+* {
+  -webkit-tap-highlight-color: transparent;
 }
