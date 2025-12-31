@@ -60,6 +60,33 @@ function useMediaQuery(query) {
   return matches;
 }
 
+function useObjectUrlState() {
+  const lastRef = useRef(null);
+  const [url, setUrl] = useState(null);
+
+  const set = useCallback((next) => {
+    if (lastRef.current && lastRef.current !== next) {
+      try {
+        URL.revokeObjectURL(lastRef.current);
+      } catch {}
+    }
+    lastRef.current = next;
+    setUrl(next);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (lastRef.current) {
+        try {
+          URL.revokeObjectURL(lastRef.current);
+        } catch {}
+      }
+    };
+  }, []);
+
+  return [url, set];
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -191,7 +218,6 @@ function analyzeForAuto(imgData) {
 }
 
 function autoSimulateFromMetrics(metrics, isDarkShirt, isLineArt) {
-  // Practical POD defaults (auto-tuned)
   let inkLimit = 2.2;
   let gain = isDarkShirt ? 0.06 : 0.09;
   let vibrance = 0.9;
@@ -343,7 +369,6 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  // Better resampling ladder; tuned for "Beast Mode" always
   upscale(sourceCanvas, targetW, targetH, preferNearest = false) {
     if (targetW <= sourceCanvas.width) {
       const copy = document.createElement("canvas");
@@ -358,8 +383,6 @@ const FastImageProcessor = {
 
     const srcW = sourceCanvas.width;
     const scale = targetW / srcW;
-
-    // tighter steps => sharper & less blur (HQ default)
     const stepMul = scale >= 6 ? 1.45 : scale >= 3 ? 1.55 : 1.65;
 
     let current = sourceCanvas;
@@ -390,7 +413,6 @@ const FastImageProcessor = {
     return final;
   },
 
-  // Tiny CAS-like sharpen (fast)
   casSharpen(canvas, strength = 0.78) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
@@ -433,7 +455,6 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  // light deblock/flat smoothing (fast)
   deblockLite(canvas, strength = 0.5, flatThreshold = 20) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
@@ -472,7 +493,6 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  // Beast-mode export (HQ always)
   async exportFinal({
     cutoutUrl,
     cutoutW,
@@ -509,7 +529,7 @@ const FastImageProcessor = {
     tempC.getContext("2d").drawImage(img, 0, 0);
 
     const isLineArt = !!classification?.isLineArt;
-    const preferNearest = isLineArt; // crisp edges for line-art
+    const preferNearest = isLineArt;
 
     await setStage(scale > 1.12 ? "Upscaling…" : "Resizing…");
     const upscaled = this.upscale(tempC, finalW, finalH, preferNearest);
@@ -523,7 +543,6 @@ const FastImageProcessor = {
       this.casSharpen(upscaled, isLineArt ? 0.62 : 0.86);
 
       if (!isLineArt) {
-        // extra micro-pass for photos
         this.deblockLite(upscaled, 0.22, 16);
         this.casSharpen(upscaled, 0.55);
       }
@@ -560,9 +579,16 @@ const FastImageProcessor = {
   },
 
   async createCutoutFromFile(file) {
+    const fileUrl = URL.createObjectURL(file);
+
     const img = new Image();
-    img.src = URL.createObjectURL(file);
+    img.src = fileUrl;
     await new Promise((r) => (img.onload = r));
+
+    // revoke ASAP after decode
+    try {
+      URL.revokeObjectURL(fileUrl);
+    } catch {}
 
     const start = performance.now();
     const canvas = document.createElement("canvas");
@@ -582,9 +608,6 @@ const FastImageProcessor = {
     const cls = await this.classify(canvas);
 
     const blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
-    try {
-      URL.revokeObjectURL(img.src);
-    } catch {}
 
     return {
       cutoutUrl: URL.createObjectURL(blob),
@@ -638,6 +661,13 @@ function usePinchPanZoom({ minZoom = 0.6, maxZoom = 6, defaultZoom = 1.12 } = {}
   const reset = useCallback(() => {
     setZoom(defaultZoom);
     setPan({ x: 0, y: 0 });
+  }, [defaultZoom]);
+
+  useEffect(() => {
+    // if default zoom changes or component re-mounts, keep it stable
+    setZoom(defaultZoom);
+    setPan({ x: 0, y: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultZoom]);
 
   const onPointerDown = useCallback(
@@ -811,7 +841,7 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
 }
 
 /* ===================== COMPARE VIEW ===================== */
-function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
+function CompareView({ beforeSrc, afterSrc, defaultZoom = 1.12 }) {
   const [pos, setPos] = useState(50);
   const draggingSlider = useRef(false);
   const containerRef = useRef(null);
@@ -876,7 +906,7 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
         }}
       >
         <div className="absolute inset-0 flex items-center justify-center">
-          <img src={afterSrc} alt="Transparent" draggable={false} className="w-full h-full object-contain drop-shadow-2xl" style={afterStyle} />
+          <img src={afterSrc} alt="Transparent" draggable={false} className="w-full h-full object-contain drop-shadow-2xl" />
         </div>
 
         <div className="absolute inset-0" style={{ clipPath: `inset(0 ${clipRight}% 0 0)` }}>
@@ -948,10 +978,6 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
           <RotateCcw size={16} />
         </button>
       </div>
-
-      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-black/40 backdrop-blur-sm px-3 py-1 rounded-full text-[9px] text-white/60 z-20 max-w-[92%] text-center">
-        Drag slider • Pinch/Wheel zoom • Pan when zoomed
-      </div>
     </div>
   );
 }
@@ -1018,7 +1044,6 @@ function ShortcutsModal({ open, onClose }) {
 /* ===================== MAIN APP ===================== */
 export default function App() {
   const isDesktop = useMediaQuery("(min-width: 1024px)");
-  const MAX_DIMENSION = 8000;
 
   // Items: {id, file, name, originalUrl, cutoutUrl, meta:{width,height,detectedBackground,hasColors,classification,metrics}}
   const [items, setItems] = useState([]);
@@ -1028,7 +1053,7 @@ export default function App() {
   const hasImage = !!activeItem?.originalUrl && !!activeItem?.cutoutUrl;
 
   // UI
-  const [viewMode, setViewMode] = useState("compare"); // compare | mockup
+  const [viewMode, setViewMode] = useState("compare"); // mobile only (compare default)
   const [showShortcuts, setShowShortcuts] = useState(false);
 
   // Processing overlay
@@ -1123,9 +1148,6 @@ export default function App() {
     return w / h;
   }, [activeItem]);
 
-  // super-light preview hint (no heavy per-frame simulation)
-  const previewHintStyle = useMemo(() => (simulateCmyk ? { filter: "saturate(0.98) contrast(0.98) brightness(0.985)" } : {}), [simulateCmyk]);
-
   /* ===================== PRESETS ===================== */
   const presets = useMemo(
     () => [
@@ -1175,8 +1197,9 @@ export default function App() {
 
       const result = await FastImageProcessor.createCutoutFromFile(file);
 
-      // pick default shirt color based on detected bg (practical)
+      // default shirt color based on detected bg (requested behavior)
       const defaultColor = result.detectedBackground === "black" ? "black" : "white";
+      setSelectedColor(defaultColor);
 
       // Smart CMYK metrics (once)
       let metrics = null;
@@ -1205,8 +1228,8 @@ export default function App() {
         meta,
       };
 
-      setSelectedColor(defaultColor);
-      setViewMode("mockup"); // WOW default (compare still one tap away)
+      // compare is default always
+      setViewMode("compare");
 
       const newCount = usageCount + 1;
       setUsageCount(newCount);
@@ -1235,7 +1258,7 @@ export default function App() {
 
         if (added.length) {
           setItems((prev) => {
-            const next = [...added.reverse(), ...prev].slice(0, 40);
+            const next = [...added.reverse(), ...prev].slice(0, 50);
             return next;
           });
           const first = added[added.length - 1];
@@ -1384,6 +1407,61 @@ export default function App() {
     return autoSimulateFromMetrics(m, isDarkShirt, isLineArt);
   }, [activeItem, isDarkShirt]);
 
+  /* ===================== LIVE CMYK PREVIEW (Compare + Mockup) ===================== */
+  const [liveCmykUrl, setLiveCmykUrl] = useObjectUrlState();
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+
+    async function build() {
+      if (!activeItem?.cutoutUrl || !simulateCmyk) {
+        setLiveCmykUrl(null);
+        return;
+      }
+
+      try {
+        const img = new Image();
+        img.src = activeItem.cutoutUrl;
+        await new Promise((r) => (img.onload = r));
+
+        const maxSide = isDesktop ? 1600 : 1200;
+        const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+        const w = Math.max(1, Math.round((img.width || 1) * scale));
+        const h = Math.max(1, Math.round((img.height || 1) * scale));
+
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const id = ctx.getImageData(0, 0, w, h);
+        applyCmykSimulation(id.data, activeSimSettings);
+        ctx.putImageData(id, 0, 0);
+
+        const blob = await new Promise((resolve, reject) => {
+          c.toBlob((b) => (b ? resolve(b) : reject(new Error("preview toBlob failed"))), "image/png");
+        });
+
+        if (cancelled) return;
+        setLiveCmykUrl(URL.createObjectURL(blob));
+      } catch (e) {
+        if (!cancelled) setLiveCmykUrl(null);
+      }
+    }
+
+    // debounce: avoids heavy rebuild while switching colors quickly
+    timer = setTimeout(build, 120);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeItem?.cutoutUrl, simulateCmyk, activeSimSettings, isDesktop, setLiveCmykUrl]);
+
+  const liveAfterSrc = simulateCmyk ? (liveCmykUrl || activeItem?.cutoutUrl || "") : activeItem?.cutoutUrl || "";
+
   /* ===================== DOWNLOAD PNG (ACTIVE) ===================== */
   const downloadActivePng = useCallback(async () => {
     if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
@@ -1443,7 +1521,7 @@ export default function App() {
 
     try {
       const JSZip = await getZipLib();
-      if (!JSZip) throw new Error("ZIP library missing. Install 'jszip' or add JSZip CDN.");
+      if (!JSZip) throw new Error("ZIP library missing. Install 'jszip' (npm i jszip).");
 
       const zip = new JSZip();
 
@@ -1526,7 +1604,7 @@ export default function App() {
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-500">
           <span className="flex items-center gap-2">
-            <Sparkles size={14} className="text-amber-400" /> Smart CMYK toggle
+            <Sparkles size={14} className="text-amber-400" /> Live CMYK preview
           </span>
           <span className="flex items-center gap-2">
             <RefreshCw size={14} className="text-emerald-500" /> Beast-mode export
@@ -1539,19 +1617,22 @@ export default function App() {
     </div>
   );
 
-  /* ===================== RESULT PANEL (REUSED) ===================== */
-  function ResultPanel({ compact = false }) {
-    const isCompare = viewMode === "compare";
-    const isMockup = viewMode === "mockup";
+  /* ===================== PANEL (Compare OR Mockup) ===================== */
+  function ResultPanel({ forcedMode = null, compact = false, title }) {
+    const mode = forcedMode || viewMode;
+    const isCompare = mode === "compare";
+    const isMockup = mode === "mockup";
 
     const bgClass = isMockup ? "fabric-texture" : "transparency-grid";
     const bgColor = isMockup ? currentColor?.bg : undefined;
+
+    const keyBase = `${activeId || "none"}-${mode}-${simulateCmyk ? 1 : 0}-${selectedColor}`;
 
     return (
       <div className="min-w-0 flex flex-col overflow-hidden">
         {!compact && (
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">{isMockup ? "Mockup" : "Compare"}</h3>
+            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">{title || (isMockup ? "Mockup" : "Compare")}</h3>
             <div className="flex items-center gap-2">
               {activeItem?.meta?.classification && (
                 <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">
@@ -1567,23 +1648,23 @@ export default function App() {
           </div>
         )}
 
-        <div className={`flex-1 rounded-2xl overflow-hidden relative min-h-[240px] border border-white/10 ${bgClass}`} style={{ backgroundColor: bgColor }}>
+        <div className={`flex-1 rounded-2xl overflow-hidden relative min-h-[220px] border border-white/10 ${bgClass}`} style={{ backgroundColor: bgColor }}>
           <PreviewFrame aspect={designAspect}>
             <div className="w-full h-full flex items-center justify-center">
               {isCompare ? (
                 <CompareView
+                  key={`${keyBase}-compare`}
                   beforeSrc={activeItem?.originalUrl || ""}
-                  afterSrc={activeItem?.cutoutUrl || ""}
-                  afterStyle={previewHintStyle}
+                  afterSrc={liveAfterSrc}
                   defaultZoom={isDesktop ? 1.18 : 1.08}
                 />
               ) : (
                 <ZoomableImage
-                  src={activeItem?.cutoutUrl || ""}
+                  key={`${keyBase}-mock`}
+                  src={liveAfterSrc}
                   alt="Transparent"
                   className="w-full h-full object-contain drop-shadow-2xl"
                   containerClassName="w-full h-full flex items-center justify-center"
-                  style={previewHintStyle}
                   defaultZoom={isDesktop ? 1.12 : 1.06}
                   hint={!isDesktop}
                 />
@@ -1608,27 +1689,6 @@ export default function App() {
             </div>
           )}
         </div>
-
-        {!compact && (
-          <div className="mt-3 flex gap-2">
-            {[
-              { mode: "compare", icon: SplitSquareHorizontal, label: "Compare" },
-              { mode: "mockup", icon: Shirt, label: "Mockup" },
-            ].map(({ mode, icon: Icon, label }) => (
-              <button
-                type="button"
-                key={mode}
-                onClick={() => setViewMode(mode)}
-                className={[
-                  "flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2",
-                  viewMode === mode ? "bg-violet-600 text-white shadow-lg shadow-violet-600/20" : "bg-white/5 hover:bg-white/10 text-slate-300",
-                ].join(" ")}
-              >
-                <Icon size={18} /> {label}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
     );
   }
@@ -1731,26 +1791,212 @@ export default function App() {
     </div>
   ) : null;
 
-  /* ===================== MOBILE: ONE-SCREEN WORKFLOW ===================== */
-  const MobileOneScreen = hasImage ? (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Top strip: Original mini + Batch thumbnails + Batch buttons (NO MODALS) */}
-      <div className="shrink-0 border-b border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl">
-        <div className="px-3 py-2 flex items-center gap-2">
-          {/* Original mini */}
+  /* ===================== DESKTOP SIDEBAR (ALL FEATURES) ===================== */
+  const DesktopSidebar = hasImage ? (
+    <aside className="h-full overflow-y-auto no-scrollbar glass-panel rounded-2xl border border-white/10 p-4">
+      {/* Export presets */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+            <Maximize2 size={14} className="text-violet-400" /> Export Size
+          </div>
+          <div className="text-[10px] text-slate-500">HQ always</div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {presets.map((p) => {
+            const needsPro = p.pro && !isPro;
+            const active = selectedPreset === p.id;
+            return (
+              <button
+                type="button"
+                key={p.id}
+                onClick={() => {
+                  if (needsPro) {
+                    setShowProModal(true);
+                    return;
+                  }
+                  setSelectedPreset(p.id);
+                  setTargetDimensions({ width: p.width, height: p.height });
+                }}
+                className={[
+                  "py-2.5 px-2 rounded-xl text-left transition-all relative border",
+                  active ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
+                  needsPro ? "opacity-60" : "",
+                ].join(" ")}
+                title={p.desc}
+              >
+                {needsPro && <Lock size={12} className="absolute top-2 right-2 text-slate-400" />}
+                <div className="font-bold text-xs">{p.label}</div>
+                <div className="text-[9px] opacity-70">{p.desc}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* CMYK toggle */}
+      <div className="mb-4 glass-panel rounded-2xl border border-white/10 p-3">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+            <Sparkles size={14} className="text-amber-400" /> CMYK Preview
+          </div>
           <button
             type="button"
-            onClick={() => setViewMode("compare")}
-            className="shrink-0 w-12 h-12 rounded-2xl border border-white/10 overflow-hidden bg-white/5"
-            title="Tap to Compare"
+            onClick={() => setSimulateCmyk((v) => !v)}
+            className={`text-[11px] px-3 py-1.5 rounded-full border font-bold ${
+              simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
+            }`}
+            title="Live CMYK in Compare + Mockup"
           >
-            <img src={activeItem?.originalUrl || ""} alt="Original thumb" className="w-full h-full object-cover" />
+            {simulateCmyk ? "ON" : "OFF"}
           </button>
+        </div>
+        <div className="mt-2 text-[10px] text-slate-500">This is a live preview. Download uses full-res simulation.</div>
+      </div>
 
-          {/* Batch thumbs */}
+      {/* Colors */}
+      <div className="mb-4 glass-panel rounded-2xl border border-white/10 p-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+            <Sliders size={14} className="text-violet-400" /> Shirt Colors
+          </div>
+          <div className="text-[10px] text-slate-500">
+            Auto: {activeItem?.meta?.detectedBackground === "black" ? "Dark" : "Light"}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-6 gap-2">
+          {(activeItem?.meta?.detectedBackground === "black" ? shirtColors.dark : shirtColors.light).map((c) => (
+            <button
+              key={c.name}
+              type="button"
+              onClick={() => setSelectedColor(c.name)}
+              className={[
+                "w-9 h-9 rounded-2xl border-2 transition-all",
+                selectedColor === c.name ? "border-violet-500 scale-[1.03]" : "border-white/10 hover:border-white/20",
+              ].join(" ")}
+              style={{ backgroundColor: c.bg }}
+              title={c.label}
+            />
+          ))}
+        </div>
+
+        <div className="mt-3 text-[10px] text-slate-500">Want the other set? Pick from “All Colors” below.</div>
+
+        <div className="mt-2 grid grid-cols-6 gap-2 opacity-80">
+          {allColors.map((c) => (
+            <button
+              key={c.name}
+              type="button"
+              onClick={() => setSelectedColor(c.name)}
+              className={[
+                "w-9 h-9 rounded-2xl border transition-all",
+                selectedColor === c.name ? "border-violet-500" : "border-white/10 hover:border-white/20",
+              ].join(" ")}
+              style={{ backgroundColor: c.bg }}
+              title={c.label}
+            />
+          ))}
+        </div>
+      </div>
+
+     {/* Batch (thumb + actions) */}
+<div className="mb-4 glass-panel rounded-2xl border border-white/10 p-3">
+  <div className="flex items-center justify-between mb-2">
+    <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Batch</div>
+    <div className="text-[10px] text-slate-500">{items.length} item(s)</div>
+  </div>
+
+  <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+  {items.slice(0, 12).map((it) => {
+    const active = it.id === activeId;
+    return (
+      <div key={it.id} className="relative shrink-0">
+        <button
+          type="button"
+          onClick={() => setActiveId(it.id)}
+          className={`w-11 h-11 rounded-xl border overflow-hidden ${
+            active ? "border-violet-500" : "border-white/10 hover:border-white/20"
+          }`}
+          title={it.name}
+        >
+          <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" />
+        </button>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            removeItem(it.id);
+          }}
+          className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-black/75 border border-white/10 flex items-center justify-center shadow-lg hover:bg-black/90"
+          title="Remove"
+        >
+          <X size={12} className="text-slate-200" />
+        </button>
+      </div>
+    );
+  })}
+</div>
+
+
+  <div className="mt-3 grid grid-cols-3 gap-2">
+    <button
+      type="button"
+      onClick={openFilePicker}
+      disabled={processing}
+      className="py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-40 text-slate-200 text-xs font-bold"
+    >
+      Add
+    </button>
+    <button
+      type="button"
+      onClick={clearAll}
+      disabled={!items.length || processing}
+      className="py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-40 text-slate-200 text-xs font-bold"
+    >
+      Clear
+    </button>
+    <button
+      type="button"
+      onClick={downloadZipAll}
+      disabled={!items.length || processing}
+      className="py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white text-xs font-bold"
+    >
+      ZIP
+    </button>
+  </div>
+</div>
+
+{/* Primary download button */}
+<div className="glass-panel rounded-2xl border border-white/10 p-3">
+  <button
+    type="button"
+    onClick={downloadActivePng}
+    disabled={!activeItem || processing}
+    className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:opacity-40 py-3.5 rounded-2xl font-extrabold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.99]"
+  >
+    <Download size={18} /> CMYK Download
+  </button>
+
+  <div className="mt-2 text-[10px] text-slate-500">
+    {simulateCmyk ? "CMYK preview enabled" : "CMYK preview off"} • PNG keeps transparency
+  </div>
+</div>
+
+    </aside>
+  ) : null;
+
+  /* ===================== MOBILE/TABLET: CLEAN ONE SCREEN ===================== */
+  const MobileOneScreen = hasImage ? (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Top strip: thumbs + add/zip */}
+      <div className="shrink-0 border-b border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl">
+        <div className="px-3 py-2 flex items-center gap-2">
           <div className="flex-1 overflow-x-auto no-scrollbar">
             <div className="flex items-center gap-2">
-              {items.slice(0, 30).map((it) => {
+              {items.slice(0, 40).map((it) => {
                 const active = it.id === activeId;
                 return (
                   <div key={it.id} className="relative shrink-0">
@@ -1760,7 +2006,7 @@ export default function App() {
                       className={`w-12 h-12 rounded-2xl border overflow-hidden ${active ? "border-violet-500" : "border-white/10"}`}
                       title={it.name}
                     >
-                      <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
+                      <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" />
                     </button>
                     <button
                       type="button"
@@ -1776,19 +2022,9 @@ export default function App() {
             </div>
           </div>
 
-          {/* Batch 3 buttons */}
           <div className="shrink-0 flex items-center gap-2">
             <button type="button" onClick={openFilePicker} className="w-11 h-11 rounded-2xl bg-violet-600 text-white flex items-center justify-center" title="Add">
               <Upload size={18} />
-            </button>
-            <button
-              type="button"
-              onClick={clearAll}
-              disabled={!items.length || processing}
-              className="w-11 h-11 rounded-2xl bg-white/5 hover:bg-white/10 disabled:opacity-40 text-slate-200 flex items-center justify-center"
-              title="Clear all"
-            >
-              <Trash2 size={18} />
             </button>
             <button
               type="button"
@@ -1803,67 +2039,69 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main preview takes maximum space */}
-      <div className="flex-1 overflow-hidden px-3 pt-2 pb-[168px]">
-        <div className="h-full">
-          <div className="h-full rounded-2xl overflow-hidden border border-white/10">
-            <ResultPanel compact />
-          </div>
+      {/* Preview */}
+      <div className="flex-1 overflow-hidden px-3 pt-2 pb-[210px]">
+        <div className="h-full rounded-2xl overflow-hidden border border-white/10">
+          <ResultPanel compact />
         </div>
       </div>
 
-      {/* Inline controls dock (no sheet, no scrolling page) */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/92 backdrop-blur-xl pb-safe" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
-        <div className="px-3 pt-3 pb-2 space-y-2">
-          {/* Row 1: Mode + CMYK + Download */}
-          <div className="flex items-center gap-2">
-            <div className="flex-1 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setViewMode("compare")}
-                className={`flex-1 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
-                  viewMode === "compare" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
-                }`}
-              >
-                <SplitSquareHorizontal size={18} /> Compare
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode("mockup")}
-                className={`flex-1 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
-                  viewMode === "mockup" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
-                }`}
-              >
-                <Shirt size={18} /> Mockup
-              </button>
-            </div>
+      {/* Bottom dock (grouped, clean) */}
+      <div
+        className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/92 backdrop-blur-xl"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        <div className="px-3 pt-3 pb-3 space-y-3">
+          {/* Mode + CMYK + Download */}
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => setViewMode("compare")}
+              className={`py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+                viewMode === "compare" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
+              }`}
+            >
+              <SplitSquareHorizontal size={18} /> Compare
+            </button>
 
             <button
               type="button"
-              onClick={() => setSimulateCmyk((v) => !v)}
-              className={`px-3 py-3 rounded-xl font-bold text-sm border ${
-                simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
+              onClick={() => setViewMode("mockup")}
+              className={`py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+                viewMode === "mockup" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
               }`}
-              title="Simulate CMYK"
             >
-              <span className="flex items-center gap-2">
-                <Sparkles size={16} className={simulateCmyk ? "text-amber-400" : "text-slate-300"} /> CMYK
-              </span>
+              <Shirt size={18} /> Mockup
             </button>
 
             <button
               type="button"
               onClick={downloadActivePng}
               disabled={!activeItem || processing}
-              className="px-4 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40 flex items-center gap-2"
+              className="py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2"
             >
               <Download size={18} /> PNG
             </button>
           </div>
 
-          {/* Row 2: Presets strip + Paste/Upload quick */}
-          <div className="flex items-center gap-2">
-            <div className="flex-1 overflow-x-auto no-scrollbar">
+          {/* CMYK + Presets */}
+          <div className="glass-panel rounded-2xl border border-white/10 p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Preview</div>
+              <button
+                type="button"
+                onClick={() => setSimulateCmyk((v) => !v)}
+                className={`text-[11px] px-3 py-1.5 rounded-full border font-bold ${
+                  simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <Sparkles size={12} className={simulateCmyk ? "text-amber-400" : "text-slate-300"} /> CMYK {simulateCmyk ? "ON" : "OFF"}
+                </span>
+              </button>
+            </div>
+
+            <div className="mt-2 overflow-x-auto no-scrollbar">
               <div className="flex items-center gap-2">
                 {presets.map((p) => {
                   const needsPro = p.pro && !isPro;
@@ -1896,26 +2134,26 @@ export default function App() {
                 })}
               </div>
             </div>
-
-            <button type="button" onClick={handlePasteButton} className="px-4 py-2.5 rounded-full bg-white/5 text-slate-200 font-bold text-xs">
-              Paste
-            </button>
-            <button type="button" onClick={openFilePicker} className="px-4 py-2.5 rounded-full bg-white/5 text-slate-200 font-bold text-xs">
-              Add
-            </button>
           </div>
 
-          {/* Row 3: Colors (only when mockup) */}
+          {/* Colors (only when mockup) */}
           {viewMode === "mockup" && (
-            <div className="overflow-x-auto no-scrollbar">
-              <div className="flex items-center gap-2 py-1">
-                {[...shirtColors.dark, ...shirtColors.light].map((c) => (
+            <div className="glass-panel rounded-2xl border border-white/10 p-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Shirt Color</div>
+                <div className="text-[10px] text-slate-500">
+                  Auto: {activeItem?.meta?.detectedBackground === "black" ? "Dark" : "Light"}
+                </div>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+                {(activeItem?.meta?.detectedBackground === "black" ? shirtColors.dark : shirtColors.light).map((c) => (
                   <button
                     key={c.name}
                     type="button"
                     onClick={() => setSelectedColor(c.name)}
                     className={[
-                      "shrink-0 w-10 h-10 rounded-2xl border-2 transition-all",
+                      "shrink-0 w-11 h-11 rounded-2xl border-2 transition-all",
                       selectedColor === c.name ? "border-violet-500 scale-[1.03]" : "border-white/10",
                     ].join(" ")}
                     style={{ backgroundColor: c.bg }}
@@ -1930,225 +2168,133 @@ export default function App() {
     </div>
   ) : null;
 
-  /* ===================== DESKTOP: CLEAN WORKSPACE ===================== */
-  const DesktopWorkspace = hasImage ? (
-    <div className="flex-1 flex overflow-hidden">
-      <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6" onDrop={onDropAny} onDragOver={onDragOver} onDragLeave={onDragLeave}>
-        <div className="h-full grid grid-cols-2 gap-3 sm:gap-4 lg:gap-6 overflow-hidden">
-          {/* Original */}
-          <div className="min-w-0 flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => removeItem(activeId)}
-                  className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
-                  title="Remove"
-                  disabled={!activeId}
-                >
-                  <Trash2 size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={clearAll}
-                  className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
-                  title="Clear all"
-                >
-                  <X size={16} />
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10">
-              <PreviewFrame aspect={designAspect}>
-                <div className="w-full h-full transparency-grid rounded-2xl overflow-hidden">
-                  <ZoomableImage
-                    src={activeItem?.originalUrl || ""}
-                    alt="Original"
-                    className="w-full h-full object-contain drop-shadow-2xl"
-                    containerClassName="w-full h-full flex items-center justify-center"
-                    defaultZoom={1.12}
-                    hint={false}
-                  />
-                </div>
-              </PreviewFrame>
-            </div>
-
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <button type="button" onClick={openFilePicker} className="py-3 bg-violet-600 hover:bg-violet-500 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
-                <Upload size={16} /> Add
-              </button>
-              <button type="button" onClick={handlePasteButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
-                <Upload size={16} /> Paste
-              </button>
-            </div>
-
-            {/* Batch strip (3 buttons + thumbs) */}
-            <div className="mt-3 glass-panel rounded-2xl p-3">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">Batch</div>
-                <div className="text-[10px] text-slate-500">{items.length} item(s)</div>
-              </div>
-
-              <div className="flex gap-2 mb-3">
-                <button
-                  type="button"
-                  onClick={openFilePicker}
-                  className="flex-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold flex items-center justify-center gap-2"
-                >
-                  <Upload size={14} /> Add
-                </button>
-                <button
-                  type="button"
-                  onClick={clearAll}
-                  disabled={!items.length || processing}
-                  className="flex-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold disabled:opacity-40 flex items-center justify-center gap-2"
-                >
-                  <Trash2 size={14} /> Clear All
-                </button>
-                <button
-                  type="button"
-                  onClick={downloadZipAll}
-                  disabled={!items.length || processing}
-                  className="flex-1 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white text-xs font-bold flex items-center justify-center gap-2"
-                >
-                  <Package size={14} /> Download ZIP
-                </button>
-              </div>
-
-              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                {items.map((it) => {
-                  const active = it.id === activeId;
-                  return (
-                    <div key={it.id} className="relative shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setActiveId(it.id)}
-                        className={`w-12 h-12 rounded-xl border overflow-hidden ${active ? "border-violet-500" : "border-white/10"}`}
-                        title={it.name}
-                      >
-                        <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeItem(it.id)}
-                        className="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-black/70 border border-white/10 flex items-center justify-center shadow-lg"
-                        title="Remove item"
-                      >
-                        <X size={14} className="text-slate-200" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Result + Controls */}
-          <div className="min-w-0 flex flex-col overflow-hidden">
-            <ResultPanel />
-
-            <div className="mt-4 grid grid-cols-1 gap-3">
-              {/* Presets */}
-              <div className="glass-panel rounded-2xl p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-                    <Maximize2 size={14} className="text-violet-400" /> Export Size
-                  </h3>
-                  <div className="text-[10px] text-slate-500">Beast mode • always HQ</div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {presets.map((p) => {
-                    const needsPro = p.pro && !isPro;
-                    const active = selectedPreset === p.id;
-                    return (
-                      <button
-                        type="button"
-                        key={p.id}
-                        onClick={() => {
-                          if (needsPro) {
-                            setShowProModal(true);
-                            return;
-                          }
-                          setSelectedPreset(p.id);
-                          setTargetDimensions({ width: p.width, height: p.height });
-                        }}
-                        className={[
-                          "py-2.5 px-2 rounded-xl text-center transition-all relative border",
-                          active ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
-                          needsPro ? "opacity-60" : "",
-                        ].join(" ")}
-                        title={p.desc}
-                      >
-                        {needsPro && <Lock size={12} className="absolute top-2 right-2 text-slate-400" />}
-                        <div className="font-bold text-xs">{p.label}</div>
-                        <div className="text-[9px] opacity-70">{p.desc}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* CMYK toggle + Colors */}
-              <div className="glass-panel rounded-2xl p-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-                    <Sliders size={14} className="text-violet-400" /> Quick Controls
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() => setSimulateCmyk((v) => !v)}
-                    className={`text-[11px] px-3 py-1.5 rounded-full border font-bold ${
-                      simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
-                    }`}
-                    title="Simulate CMYK (auto tuned)"
-                  >
-                    <span className="flex items-center gap-2">
-                      <Sparkles size={12} className={simulateCmyk ? "text-amber-400" : "text-slate-300"} /> Simulate CMYK
-                    </span>
-                  </button>
-                </div>
-
-                <div className="mt-4">
-                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Mockup Colors</div>
-                  <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-                    {[...shirtColors.dark, ...shirtColors.light].map((c) => (
-                      <button
-                        type="button"
-                        key={c.name}
-                        onClick={() => setSelectedColor(c.name)}
-                        title={c.label}
-                        className={[
-                          "shrink-0 w-10 h-10 rounded-2xl border-2 transition-all",
-                          selectedColor === c.name ? "border-violet-500 scale-[1.04] shadow-lg shadow-violet-500/20" : "border-white/10 hover:border-white/20",
-                        ].join(" ")}
-                        style={{ backgroundColor: c.bg }}
-                      />
-                    ))}
-                  </div>
-                  <div className="mt-2 text-[10px] text-slate-500">Tip: switch to Mockup to see shirt color.</div>
-                </div>
-              </div>
-
-              {/* Download */}
-              <div className="glass-panel rounded-2xl p-4">
-                <button
-                  type="button"
-                  onClick={downloadActivePng}
-                  disabled={!activeItem || processing}
-                  className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:opacity-40 py-4 rounded-2xl font-extrabold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.99]"
-                >
-                  <Download size={20} /> Download PNG
-                </button>
-                <div className="mt-2 text-[10px] text-center text-slate-500">One tap export • transparent PNG</div>
-              </div>
-            </div>
+  /* ===================== DESKTOP: SIDE-BY-SIDE + SIDEBAR (LIKE SCREENSHOT) ===================== */
+const DesktopWorkspace = hasImage ? (
+  <div
+    className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6"
+    onDrop={onDropAny}
+    onDragOver={onDragOver}
+    onDragLeave={onDragLeave}
+  >
+    <div className="h-full grid grid-cols-[1fr,1fr,340px] gap-4 lg:gap-6 overflow-hidden">
+      {/* LEFT: ORIGINAL */}
+      <section className="min-w-0 flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => removeItem(activeId)}
+              className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
+              title="Remove active"
+              disabled={!activeId || processing}
+            >
+              <Trash2 size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={clearAll}
+              className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
+              title="Clear all"
+              disabled={!items.length || processing}
+            >
+              <X size={16} />
+            </button>
           </div>
         </div>
-      </main>
+
+        <div className="flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10">
+          <PreviewFrame aspect={designAspect}>
+            <div className="w-full h-full transparency-grid rounded-2xl overflow-hidden">
+              <ZoomableImage
+                key={`${activeId || "none"}-orig`}
+                src={activeItem?.originalUrl || ""}
+                alt="Original"
+                className="w-full h-full object-contain drop-shadow-2xl"
+                containerClassName="w-full h-full flex items-center justify-center"
+                defaultZoom={1.12}
+                hint={false}
+              />
+            </div>
+          </PreviewFrame>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={openFilePicker}
+            disabled={processing}
+            className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-40"
+          >
+            <Upload size={16} /> Upload
+          </button>
+          <button
+            type="button"
+            onClick={handlePasteButton}
+            disabled={processing}
+            className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-40"
+          >
+            <Upload size={16} /> Paste
+          </button>
+        </div>
+      </section>
+
+      {/* CENTER: PREVIEW (COMPARE/MOCKUP SAME FRAME) */}
+      <section className="min-w-0 flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+            {viewMode === "mockup" ? "Mockup" : "Compare"}
+          </h3>
+
+          <div className="flex items-center gap-2">
+            {activeItem?.meta?.classification && (
+              <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">
+                {activeItem.meta.classification.isLineArt ? "line-art" : "photo"}
+              </span>
+            )}
+            {simulateCmyk && (
+              <span className="text-[10px] text-amber-200 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded-full flex items-center gap-1">
+                <Sparkles size={10} className="text-amber-400" /> CMYK
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 rounded-2xl overflow-hidden border border-white/10">
+          {/* ResultPanel already renders compare/mockup inside stable aspect frame */}
+          <ResultPanel forcedMode={viewMode} compact />
+        </div>
+
+        {/* Bottom mode switch like screenshot */}
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setViewMode("compare")}
+            className={`py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+              viewMode === "compare" ? "bg-violet-600 text-white" : "bg-white/5 hover:bg-white/10 text-slate-200"
+            }`}
+          >
+            <SplitSquareHorizontal size={18} /> Compare
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setViewMode("mockup")}
+            className={`py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+              viewMode === "mockup" ? "bg-violet-600 text-white" : "bg-white/5 hover:bg-white/10 text-slate-200"
+            }`}
+          >
+            <Shirt size={18} /> Mockup
+          </button>
+        </div>
+      </section>
+
+      {/* RIGHT: SIDEBAR */}
+      <section className="min-w-0 overflow-hidden">{DesktopSidebar}</section>
     </div>
-  ) : null;
+  </div>
+) : null;
+
 
   /* ===================== MAIN RENDER ===================== */
   return (
@@ -2169,19 +2315,21 @@ export default function App() {
         </div>
       )}
 
-      {!hasImage ? (
-        <div className="flex-1 overflow-hidden">{Landing}</div>
-      ) : (
-        <>{isDesktop ? DesktopWorkspace : MobileOneScreen}</>
-      )}
+      {!hasImage ? <div className="flex-1 overflow-hidden">{Landing}</div> : <>{isDesktop ? DesktopWorkspace : MobileOneScreen}</>}
 
-      {/* Global file input (MULTI) */}
+      {/* Global file input (MULTI) — not display:none (fixes mobile “doesn’t respond”) */}
       <input
         ref={fileInputRef}
         type="file"
         accept="image/*"
         multiple
-        className="hidden"
+        style={{
+          position: "absolute",
+          left: "-9999px",
+          width: "1px",
+          height: "1px",
+          opacity: 0,
+        }}
         onChange={(e) => {
           const files = e.target.files;
           if (files?.length) addFiles(files);
