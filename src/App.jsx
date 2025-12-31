@@ -423,11 +423,11 @@ const FastImageProcessor = {
       if (d[i + 3] < 10) continue;
 
       if (is565) {
-        d[i] = (d[i] & 0xF8);
+        d[i]     = (d[i]     & 0xF8);
         d[i + 1] = (d[i + 1] & 0xFC);
         d[i + 2] = (d[i + 2] & 0xF8);
       } else {
-        d[i] = (d[i] & 0xF8);
+        d[i]     = (d[i]     & 0xF8);
         d[i + 1] = (d[i + 1] & 0xF8);
         d[i + 2] = (d[i + 2] & 0xF8);
       }
@@ -527,19 +527,21 @@ const FastImageProcessor = {
 
     // ---- Adaptive params for 5x-10x ----
     const denoiseStrength = s >= 8 ? 0.58 : s >= 6 ? 0.52 : s >= 4 ? 0.42 : 0.28;
-    const casStrength = s >= 8 ? 0.82 : s >= 6 ? 0.78 : s >= 4 ? 0.70 : 0.60;
+    const casStrength     = s >= 8 ? 0.82 : s >= 6 ? 0.78 : s >= 4 ? 0.70 : 0.60;
     const deblockStrength = s >= 8 ? 0.50 : s >= 6 ? 0.45 : s >= 4 ? 0.38 : 0.32;
-    const flatThr = s >= 8 ? 22 : s >= 6 ? 20 : 18;
+    const flatThr         = s >= 8 ? 22   : s >= 6 ? 20   : 18;
 
     if (isUpscale) {
       this.deblockLite(upscaledCanvas, deblockStrength, flatThr);
       this.cheapDenoise(upscaledCanvas, denoiseStrength);
       this.casSharpen(upscaledCanvas, casStrength);
 
+      // tiny unsharp for photos only (avoid halos at huge scales)
       if (!isLineArt && s < 6) {
         this.smartSharpen(upscaledCanvas, 0.22, 1.05);
       }
 
+      // grain only עד פי 6 (פי 10 לא מוסיף איכות ורק מנפח PNG)
       if (s < 6) {
         this.addFilmGrain(upscaledCanvas, isLineArt ? 2 : 3);
       }
@@ -557,6 +559,7 @@ const FastImageProcessor = {
 
     if (upscaledCanvas) upscaledCanvas.width = 0;
 
+    // ---- POD simulation (optional) ----
     if (
       podSettings?.saturationReduction < 1 ||
       podSettings?.darknessIncrease < 1 ||
@@ -567,6 +570,7 @@ const FastImageProcessor = {
       ctx.putImageData(data, 0, 0);
     }
 
+    // ---- FINAL SIZE OPTIMIZATION (FAST) ----
     this.cleanupAlpha(out);
     if (scale >= 3) {
       this.quantizeBitDepth(out, isLineArt ? '555' : '565');
@@ -826,7 +830,7 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.35 }) {
 
       {/* Labels */}
       <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-20">Original</div>
-      <div className="absolute top-3 right-3 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-20">Cutout (Transparent)</div>
+      <div className="absolute top-3 right-3 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-20">Cutout</div>
 
       {/* Controls */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/70 backdrop-blur-md rounded-full px-2 py-1.5 shadow-xl border border-white/10 z-30">
@@ -873,7 +877,7 @@ function ShortcutsModal({ open, onClose }) {
   if (!open) return null;
 
   const shortcuts = [
-    { keys: 'Ctrl/⌘ + V', desc: 'Paste an image from clipboard (works anywhere)' },
+    { keys: 'Ctrl/⌘ + V', desc: 'Paste an image from clipboard (desktop)' },
     { keys: 'Shift + /  ( ? )', desc: 'Open/close this shortcuts panel' },
     { keys: 'Mouse Wheel', desc: 'Zoom in/out in preview' },
     { keys: 'Ctrl/⌘ + Wheel', desc: 'Faster zoom' },
@@ -918,7 +922,7 @@ function ShortcutsModal({ open, onClose }) {
           </div>
 
           <div className="mt-5 text-[10px] text-slate-500">
-            Tip: Paste works even if you didn’t click inside the app first.
+            Tip: Mobile paste needs the Paste button (browser limitation).
           </div>
         </div>
       </div>
@@ -938,6 +942,7 @@ export default function App() {
   const [selectedColor, setSelectedColor] = useState('black');
   const [detectedBg, setDetectedBg] = useState(null);
   const [viewMode, setViewMode] = useState('mockup');
+
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [selectedPreset, setSelectedPreset] = useState('original');
   const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0 });
@@ -958,9 +963,19 @@ export default function App() {
 
   const [showShortcuts, setShowShortcuts] = useState(false);
 
-  // ✅ Mobile responsive controls
-  const [activePanel, setActivePanel] = useState('result'); // 'original' | 'result'
-  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  // Mobile drawer + paste fallback
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  const pasteCatcherRef = useRef(null);
+  const [showPasteCatcher, setShowPasteCatcher] = useState(false);
+
+  // Collapsible sidebar (tablet/desktop)
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('pr_sidebar_open') ?? 'true'); }
+    catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pr_sidebar_open', JSON.stringify(sidebarOpen)); } catch { }
+  }, [sidebarOpen]);
 
   const fileInputRef = useRef(null);
   const FREE_LIMIT = 5;
@@ -1007,6 +1022,31 @@ export default function App() {
     } catch { }
   };
 
+  // ===== Paste button: best possible across devices =====
+  const handlePasteButton = useCallback(async () => {
+    // Try Clipboard API (works great on Android Chrome + some desktop)
+    try {
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const type = item.types?.find(t => t.startsWith('image/'));
+          if (type) {
+            const blob = await item.getType(type);
+            const file = new File([blob], `pasted-${Date.now()}.png`, { type });
+            await handleFileSelect(file);
+            return;
+          }
+        }
+      }
+    } catch {
+      // fallback below
+    }
+
+    // Fallback: paste catcher (best for iOS/Safari)
+    setShowPasteCatcher(true);
+    requestAnimationFrame(() => pasteCatcherRef.current?.focus());
+  }, []); // handleFileSelect is defined below, but we re-bind after its declaration
+
   // ✅ Upload: process ONE TIME → cache cutout URL
   const handleFileSelect = useCallback(async (file) => {
     if (!file?.type?.startsWith('image/')) return;
@@ -1051,18 +1091,39 @@ export default function App() {
         mode: result.classification?.isLineArt ? 'line-art' : 'photo'
       });
 
+      // ✅ Default view is Compare (best UX)
+      setViewMode('compare');
+
       const newCount = usageCount + 1;
       setUsageCount(newCount);
       saveUsage(newCount);
-
-      // Mobile UX: show result immediately, keep settings closed unless user opens
-      setActivePanel('result');
     } catch (err) {
       console.error('Cutout error:', err);
     } finally {
       setProcessing(false);
     }
   }, [isPro, usageCount, targetDimensions.width, targetDimensions.height, setOriginalUrlTracked, setCutoutUrlTracked]);
+
+  // re-bind paste button with handleFileSelect available
+  const handlePasteButtonBound = useCallback(async () => {
+    try {
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const type = item.types?.find(t => t.startsWith('image/'));
+          if (type) {
+            const blob = await item.getType(type);
+            const file = new File([blob], `pasted-${Date.now()}.png`, { type });
+            await handleFileSelect(file);
+            return;
+          }
+        }
+      }
+    } catch { }
+
+    setShowPasteCatcher(true);
+    requestAnimationFrame(() => pasteCatcherRef.current?.focus());
+  }, [handleFileSelect]);
 
   // ✅ Preset switch: NO processing. Only recompute label sizes.
   useEffect(() => {
@@ -1120,8 +1181,7 @@ export default function App() {
     setCustomWidth('');
     setCustomHeight('');
     setShowCustomInput(false);
-    setMobileSheetOpen(false);
-    setActivePanel('result');
+    setMobilePanelOpen(false);
   };
 
   const resetSettings = () => {
@@ -1140,7 +1200,7 @@ export default function App() {
     });
   };
 
-  // ============ Clipboard: Paste Image ============
+  // ============ Clipboard: Desktop paste (global) ============
   useEffect(() => {
     const onPaste = async (e) => {
       if (isTypingTarget(document.activeElement)) return;
@@ -1169,6 +1229,7 @@ export default function App() {
     const onKeyDown = (e) => {
       if (isTypingTarget(document.activeElement)) return;
 
+      // Shift + /  -> '?'
       if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         setShowShortcuts(s => !s);
@@ -1180,9 +1241,202 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // ===================== Sidebar content (reused for desktop + mobile drawer) =====================
+  const SidebarContent = ({ dense = false }) => (
+    <div className={`${dense ? 'space-y-5' : 'space-y-6'}`}>
+      {/* Size Presets */}
+      <section className="glass-panel rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-semibold text-white flex items-center gap-2">
+            <Maximize2 size={14} className="text-violet-400" /> Size Preset
+          </h3>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { id: 'original', label: 'Original', width: 0, height: 0, desc: 'No resize' },
+            { id: 'tshirt', label: 'T-Shirt', width: 4500, height: 5400, desc: '4500×5400' },
+            { id: 'hoodie', label: 'Hoodie', width: 4500, height: 4800, desc: '4500×4800' },
+            { id: 'mug', label: 'Mug 11oz', width: 2700, height: 1100, desc: '2700×1100' },
+            { id: 'poster', label: 'Poster 18×24', width: 5400, height: 7200, desc: '5400×7200', pro: true },
+            { id: 'phone', label: 'Phone Case', width: 1300, height: 2000, desc: '1300×2000' },
+          ].map(preset => {
+            const needsPro = preset.pro && !isPro;
+            return (
+              <button
+                key={preset.id}
+                onClick={() => {
+                  if (needsPro) { setShowProModal(true); return; }
+                  setSelectedPreset(preset.id);
+                  setTargetDimensions({ width: preset.width, height: preset.height });
+                  setShowCustomInput(false);
+                }}
+                className={`py-2.5 px-2 rounded-lg text-center transition-all relative ${selectedPreset === preset.id && !showCustomInput
+                  ? 'bg-violet-600 text-white'
+                  : needsPro
+                    ? 'bg-slate-800/50 text-slate-500'
+                    : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
+                  }`}
+              >
+                {needsPro && <Lock size={10} className="absolute top-1 right-1 text-slate-600" />}
+                <div className="font-semibold text-xs">{preset.label}</div>
+                <div className="text-[9px] opacity-70">{preset.desc}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Custom size */}
+        <button
+          onClick={() => {
+            setShowCustomInput(!showCustomInput);
+            if (!showCustomInput) setSelectedPreset('custom');
+          }}
+          className={`w-full mt-2 py-2.5 px-3 rounded-lg text-center transition-all ${showCustomInput ? 'bg-violet-600 text-white' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
+            }`}
+        >
+          <div className="font-semibold text-xs">Custom Size</div>
+          <div className="text-[9px] opacity-70">Up to {MAX_DIMENSION}×{MAX_DIMENSION}px</div>
+        </button>
+
+        {showCustomInput && (
+          <div className="mt-3 space-y-2">
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="text-[10px] text-slate-500 mb-1 block">Width</label>
+                <input
+                  type="number"
+                  value={customWidth}
+                  onChange={(e) => setCustomWidth(e.target.value)}
+                  placeholder="4500"
+                  max={MAX_DIMENSION}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                />
+              </div>
+              <div className="flex items-end pb-2 text-slate-500">×</div>
+              <div className="flex-1">
+                <label className="text-[10px] text-slate-500 mb-1 block">Height</label>
+                <input
+                  type="number"
+                  value={customHeight}
+                  onChange={(e) => setCustomHeight(e.target.value)}
+                  placeholder="5400"
+                  max={MAX_DIMENSION}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                const w = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customWidth) || 0));
+                const h = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customHeight) || 0));
+                if (w > 0 && h > 0) setTargetDimensions({ width: w, height: h });
+              }}
+              className="w-full py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-xs font-medium text-white transition-all"
+            >
+              Apply Custom Size
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* Colors */}
+      <section>
+        <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Mockup Colors</h3>
+        <div className="mb-4">
+          <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Moon size={10} /> Dark</span>
+          <div className="grid grid-cols-6 gap-2">
+            {shirtColors.dark.map(c => (
+              <button
+                key={c.name}
+                onClick={() => setSelectedColor(c.name)}
+                title={c.label}
+                className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
+                  }`}
+                style={{ backgroundColor: c.bg }}
+              />
+            ))}
+          </div>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Sun size={10} /> Light</span>
+          <div className="grid grid-cols-6 gap-2">
+            {shirtColors.light.map(c => (
+              <button
+                key={c.name}
+                onClick={() => setSelectedColor(c.name)}
+                title={c.label}
+                className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
+                  }`}
+                style={{ backgroundColor: c.bg }}
+              />
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Print Simulation */}
+      <section>
+        <button onClick={() => setSettingsOpen(!settingsOpen)} className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">
+          <span className="flex items-center gap-2">
+            <Sliders size={12} /> Print Simulation
+          </span>
+          <ChevronDown size={14} className={`transition-transform ${settingsOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {settingsOpen && (
+          <div className="space-y-5">
+            {[
+              { label: 'Saturation', key: 'saturationReduction', min: 0.5, max: 1 },
+              { label: 'Brightness', key: 'darknessIncrease', min: 0.6, max: 1 },
+              { label: 'Contrast', key: 'contrastReduction', min: 0.7, max: 1 },
+            ].map(s => (
+              <div key={s.key} className={`${!originalFile ? 'opacity-40 pointer-events-none' : ''}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-slate-300 font-medium">{s.label}</span>
+                  <span className="text-xs font-mono text-violet-400 bg-slate-800/50 px-2 py-0.5 rounded tabular-nums">
+                    {Math.round(podSettings[s.key] * 100)}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={s.min}
+                  max={s.max}
+                  step={0.01}
+                  value={podSettings[s.key]}
+                  onChange={(e) => setPodSettings(p => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
+                  disabled={!originalFile}
+                  className="w-full h-2 bg-slate-800 rounded-full appearance-none cursor-pointer
+                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5 
+                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500 
+                    [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-violet-500/30
+                    [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:active:cursor-grabbing
+                    [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110
+                    [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full 
+                    [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
+                  style={{ touchAction: 'none' }}
+                />
+              </div>
+            ))}
+
+            <div className="flex gap-2">
+              <button onClick={simulatePrint} disabled={!originalFile} className="flex-1 py-2 bg-violet-600/20 hover:bg-violet-600/30 text-violet-400 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1.5 disabled:opacity-40">
+                <Shirt size={12} /> Simulate Print
+              </button>
+              <button onClick={resetSettings} disabled={!originalFile} className="flex-1 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-medium text-slate-400 flex items-center justify-center gap-1.5 disabled:opacity-40">
+                <RotateCcw size={12} /> Reset 100%
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+
   // ============ UI ============
   return (
-    <div className="min-h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
+    <div className="h-screen flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]">
       <style>{`
         .transparency-grid {
           background-image: 
@@ -1203,6 +1457,49 @@ export default function App() {
       `}</style>
 
       <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {/* Paste catcher modal (mobile Safari fallback) */}
+      {showPasteCatcher && (
+        <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#14141a] border border-white/10 rounded-3xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-white font-bold">Paste Image</div>
+              <button
+                onClick={() => setShowPasteCatcher(false)}
+                className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="text-sm text-slate-400 mb-3">
+              Tap the box, then choose Paste.
+            </p>
+
+            <textarea
+              ref={pasteCatcherRef}
+              className="w-full h-28 rounded-2xl bg-slate-900/60 border border-white/10 p-3 text-slate-200 focus:outline-none focus:border-violet-500"
+              placeholder="Tap here → Paste"
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+
+                for (const it of items) {
+                  if (it.type?.startsWith('image/')) {
+                    const file = it.getAsFile();
+                    if (file) {
+                      e.preventDefault();
+                      setShowPasteCatcher(false);
+                      handleFileSelect(file);
+                      return;
+                    }
+                  }
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Pro Modal */}
       {showProModal && (
@@ -1236,7 +1533,7 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="h-14 border-b border-white/5 flex items-center justify-between px-4 sm:px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-20 shrink-0">
+      <header className="h-14 border-b border-white/5 flex items-center justify-between px-3 sm:px-6 bg-[#0c0c0f]/90 backdrop-blur-xl z-20 shrink-0">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-gradient-to-br from-violet-600 to-fuchsia-600 rounded-xl shadow-lg shadow-violet-500/20">
             <Shirt size={18} className="text-white" />
@@ -1255,10 +1552,30 @@ export default function App() {
             </span>
           )}
           {cutoutMeta?.classification && (
-            <span className="hidden sm:inline text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
+            <span className="hidden sm:inline-flex text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
               {cutoutMeta.classification.isLineArt ? 'line-art' : 'photo'}
             </span>
           )}
+
+          {/* Desktop/tablet: sidebar toggle */}
+          <button
+            onClick={() => setSidebarOpen(s => !s)}
+            className="hidden md:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
+            title={sidebarOpen ? "Hide panel" : "Show panel"}
+          >
+            <Sliders size={14} className="text-violet-300" />
+            {sidebarOpen ? "Hide" : "Show"}
+          </button>
+
+          {/* Desktop/tablet: paste button */}
+          <button
+            onClick={handlePasteButtonBound}
+            className="hidden md:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
+            title="Paste image"
+          >
+            <Upload size={14} className="text-violet-300" />
+            Paste
+          </button>
 
           <button
             onClick={() => setShowShortcuts(true)}
@@ -1278,166 +1595,161 @@ export default function App() {
 
       {/* Main */}
       <div className="flex-1 flex overflow-hidden">
-        <main
-          className={`flex-1 flex flex-col lg:flex-row items-stretch p-3 sm:p-4 lg:p-6 gap-3 sm:gap-4 lg:gap-6 overflow-hidden
-          ${originalImage ? 'pb-24 lg:pb-6' : ''}`}
-        >
-          {!originalImage ? (
-            <div className="flex-1 flex items-center justify-center">
-              <div
-                onDrop={handleDrop}
-                onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }}
-                onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
-                onClick={() => fileInputRef.current?.click()}
-                className="max-w-xl w-full glass-panel rounded-3xl p-10 sm:p-16 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center group"
-              >
-                <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
-                <div className="w-24 h-24 sm:w-28 sm:h-28 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-6 sm:mb-8 group-hover:scale-110 transition-transform duration-300">
-                  <Upload className="text-violet-400" size={44} />
-                </div>
-                <h2 className="text-2xl sm:text-3xl font-bold text-white mb-3 sm:mb-4">Drop your design here</h2>
-                <p className="text-slate-400 text-base mb-3 sm:mb-4">PNG, JPG, or WebP • Black or white background</p>
-                <p className="text-slate-500 text-sm mb-6 sm:mb-8">Tip: paste an image (Ctrl/⌘+V)</p>
-                <div className="inline-block px-8 sm:px-10 py-3 sm:py-4 bg-violet-600 hover:bg-violet-500 rounded-xl text-base font-semibold transition-colors">Browse Files</div>
-                <div className="mt-8 sm:mt-10 flex items-center justify-center gap-6 sm:gap-8 text-sm text-slate-500 flex-wrap">
-                  <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Instant preview</span>
-                  <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> One-time cutout</span>
-                  <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Export enhancement</span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Mobile Tabs */}
-              <div className="lg:hidden glass-panel rounded-2xl p-2 flex gap-2 mb-1 shrink-0">
-                <button
-                  onClick={() => setActivePanel('original')}
-                  className={`flex-1 py-3 rounded-xl text-sm font-bold transition ${activePanel === 'original' ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-300'}`}
-                >
-                  Original
-                </button>
-                <button
-                  onClick={() => setActivePanel('result')}
-                  className={`flex-1 py-3 rounded-xl text-sm font-bold transition ${activePanel === 'result' ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-300'}`}
-                >
-                  Result
-                </button>
-              </div>
-
-              {/* Original */}
-              <div className={`flex-1 flex flex-col min-w-0 ${activePanel === 'result' ? 'hidden lg:flex' : ''}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
-                  <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"><X size={16} /></button>
-                </div>
-
-                <div className="flex-1 transparency-grid rounded-2xl overflow-hidden relative">
-                  <VirtualCanvasFrame
-                    targetW={targetDimensions.width}
-                    targetH={targetDimensions.height}
-                    fallbackW={cutoutMeta?.width}
-                    fallbackH={cutoutMeta?.height}
+        {/* Content */}
+        <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6">
+          <div className="h-full grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 lg:gap-6 overflow-hidden">
+            {/* LEFT */}
+            <div className="min-w-0 flex flex-col overflow-hidden">
+              {!originalImage ? (
+                <div className="flex-1 flex items-center justify-center">
+                  <div
+                    onDrop={handleDrop}
+                    onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }}
+                    onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="max-w-xl w-full glass-panel rounded-3xl p-10 sm:p-14 border-2 border-dashed border-white/10 hover:border-violet-500/50 transition-all cursor-pointer text-center group"
                   >
-                    <ZoomableImage
-                      src={originalImage}
-                      alt="Original"
-                      className="w-full h-full object-contain drop-shadow-2xl"
-                      containerClassName="w-full h-full flex items-center justify-center"
-                      defaultZoom={1.15}
-                    />
-                  </VirtualCanvasFrame>
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+                    <div className="w-24 h-24 sm:w-28 sm:h-28 bg-gradient-to-br from-violet-600/20 to-fuchsia-600/20 rounded-3xl flex items-center justify-center mx-auto mb-7 group-hover:scale-110 transition-transform duration-300">
+                      <Upload className="text-violet-400" size={42} />
+                    </div>
+                    <h2 className="text-2xl sm:text-3xl font-bold text-white mb-3">Drop your design here</h2>
+                    <p className="text-slate-400 text-base mb-3">PNG, JPG, or WebP • Black or white background</p>
+                    <p className="text-slate-500 text-sm mb-6">Tip: paste an image (desktop Ctrl/⌘+V, mobile use Paste button)</p>
+                    <div className="inline-block px-9 py-3.5 bg-violet-600 hover:bg-violet-500 rounded-xl text-base font-semibold transition-colors">Browse Files</div>
 
-                  {imageSize && <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 z-20">{imageSize.original}</div>}
-                </div>
-
-                <button onClick={() => fileInputRef.current?.click()} className="mt-3 w-full py-4 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
-                  <Upload size={16} /> Upload Different
-                </button>
-                <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
-              </div>
-
-              {/* Result */}
-              <div className={`flex-1 flex flex-col min-w-0 ${activePanel === 'original' ? 'hidden lg:flex' : ''}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
-                    {viewMode === 'mockup' ? 'Mockup' : viewMode === 'png' ? 'Cutout PNG' : 'Compare'}
-                  </h3>
-                  <div className="flex items-center gap-2">
-                    {cutoutMeta && (
-                      <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">
-                        {cutoutMeta.classification?.isLineArt ? 'line-art auto' : 'photo auto'}
-                      </span>
-                    )}
-                    {cutoutUrl && <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>}
+                    <div className="mt-8 flex flex-wrap items-center justify-center gap-5 text-sm text-slate-500">
+                      <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Instant preview</span>
+                      <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> One-time cutout</span>
+                      <span className="flex items-center gap-2"><Zap size={16} className="text-emerald-500" /> Export enhancement</span>
+                    </div>
                   </div>
                 </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
+                    <button onClick={resetAll} className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"><X size={16} /></button>
+                  </div>
 
-                <div
-                  className={`flex-1 rounded-2xl overflow-hidden relative ${viewMode === 'mockup'
-                    ? 'fabric-texture'
-                    : 'transparency-grid'
-                    }`}
-                  style={{ backgroundColor: viewMode === 'mockup' ? currentColor?.bg : undefined }}
-                >
-                  {viewMode === 'mockup' && (
-                    <div
-                      className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px]"
-                      style={{ borderColor: isLightShirt ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.1)' }}
-                    />
+                  <div className="flex-1 transparency-grid rounded-2xl overflow-hidden relative min-h-[280px]">
+                    <VirtualCanvasFrame
+                      targetW={targetDimensions.width}
+                      targetH={targetDimensions.height}
+                      fallbackW={cutoutMeta?.width}
+                      fallbackH={cutoutMeta?.height}
+                    >
+                      <ZoomableImage
+                        src={originalImage}
+                        alt="Original"
+                        className="w-full h-full object-contain drop-shadow-2xl"
+                        containerClassName="w-full h-full flex items-center justify-center"
+                        defaultZoom={1.1}
+                      />
+                    </VirtualCanvasFrame>
+
+                    {imageSize && <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 z-20">{imageSize.original}</div>}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button onClick={() => fileInputRef.current?.click()} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                      <Upload size={16} /> Upload
+                    </button>
+                    <button onClick={handlePasteButtonBound} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+                      <Upload size={16} /> Paste
+                    </button>
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files[0])} />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* RIGHT */}
+            <div className="min-w-0 flex flex-col overflow-hidden">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+                  {viewMode === 'mockup' ? 'Mockup' : viewMode === 'png' ? 'Cutout PNG' : 'Compare'}
+                </h3>
+                <div className="flex items-center gap-2">
+                  {cutoutMeta && (
+                    <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">
+                      {cutoutMeta.classification?.isLineArt ? 'line-art auto' : 'photo auto'}
+                    </span>
                   )}
+                  {cutoutUrl && <span className="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>}
+                </div>
+              </div>
 
-                  {processing ? (
-                    <div className="w-full h-full flex items-center justify-center">
-                      <div className="text-center">
-                        <RefreshCw className="animate-spin text-violet-500 mx-auto mb-4" size={48} />
-                        <p className="text-base text-slate-300">Working…</p>
-                      </div>
+              <div
+                className={`flex-1 rounded-2xl overflow-hidden relative min-h-[280px] ${viewMode === 'mockup'
+                  ? 'fabric-texture'
+                  : 'transparency-grid'
+                  }`}
+                style={{ backgroundColor: viewMode === 'mockup' ? currentColor?.bg : undefined }}
+              >
+                {viewMode === 'mockup' && (
+                  <div
+                    className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px]"
+                    style={{ borderColor: isLightShirt ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.1)' }}
+                  />
+                )}
+
+                {processing ? (
+                  <div className="w-full h-full flex items-center justify-center">
+                    <div className="text-center">
+                      <RefreshCw className="animate-spin text-violet-500 mx-auto mb-4" size={48} />
+                      <p className="text-base text-slate-300">Working…</p>
                     </div>
-                  ) : cutoutUrl ? (
-                    viewMode === 'compare' ? (
+                  </div>
+                ) : cutoutUrl ? (
+                  viewMode === 'compare' ? (
+                    // Compare over selected shirt color (no need to open settings)
+                    <div className="absolute inset-0" style={{ backgroundColor: currentColor?.bg }}>
                       <CompareView
                         beforeSrc={originalImage}
                         afterSrc={cutoutUrl}
                         afterStyle={cssFilters}
                         defaultZoom={1.35}
                       />
-                    ) : (
-                      <VirtualCanvasFrame
-                        targetW={targetDimensions.width}
-                        targetH={targetDimensions.height}
-                        fallbackW={cutoutMeta?.width}
-                        fallbackH={cutoutMeta?.height}
-                      >
-                        <ZoomableImage
-                          src={cutoutUrl}
-                          alt="Cutout"
-                          className="w-full h-full object-contain drop-shadow-2xl"
-                          containerClassName="w-full h-full flex items-center justify-center"
-                          style={cssFilters}
-                          defaultZoom={1.15}
-                        />
-                      </VirtualCanvasFrame>
-                    )
-                  ) : null}
+                    </div>
+                  ) : (
+                    <VirtualCanvasFrame
+                      targetW={targetDimensions.width}
+                      targetH={targetDimensions.height}
+                      fallbackW={cutoutMeta?.width}
+                      fallbackH={cutoutMeta?.height}
+                    >
+                      <ZoomableImage
+                        src={cutoutUrl}
+                        alt="Cutout"
+                        className="w-full h-full object-contain drop-shadow-2xl"
+                        containerClassName="w-full h-full flex items-center justify-center"
+                        style={cssFilters}
+                        defaultZoom={1.1}
+                      />
+                    </VirtualCanvasFrame>
+                  )
+                ) : null}
 
-                  {cutoutUrl && !processing && viewMode !== 'compare' && (
-                    <>
-                      <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
-                        <Sparkles size={10} className="text-amber-400" />
-                        {viewMode === 'mockup' ? 'POD Preview' : 'Transparent Cutout'}
+                {cutoutUrl && !processing && viewMode !== 'compare' && (
+                  <>
+                    <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
+                      <Sparkles size={10} className="text-amber-400" />
+                      {viewMode === 'mockup' ? 'POD Preview' : 'Transparent Cutout'}
+                    </div>
+
+                    {imageSize && (
+                      <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 flex items-center gap-1 z-20">
+                        {(targetDimensions.width > 0 || targetDimensions.height > 0) && <Maximize2 size={10} />}
+                        {imageSize.output}
                       </div>
+                    )}
+                  </>
+                )}
+              </div>
 
-                      {imageSize && (
-                        <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-400 flex items-center gap-1 z-20">
-                          {(targetDimensions.width > 0 || targetDimensions.height > 0) && <Maximize2 size={10} />}
-                          {imageSize.output}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-
-                {cutoutUrl && (
+              {cutoutUrl && (
+                <>
                   <div className="mt-3 flex gap-2">
                     {[
                       { mode: 'mockup', icon: Shirt, label: 'Mockup' },
@@ -1447,7 +1759,7 @@ export default function App() {
                       <button
                         key={mode}
                         onClick={() => setViewMode(mode)}
-                        className={`flex-1 py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${viewMode === mode
+                        className={`flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${viewMode === mode
                           ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/20'
                           : 'bg-white/5 hover:bg-white/10 text-slate-400'
                           }`}
@@ -1456,227 +1768,101 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
-            </>
-          )}
+
+                  {/* Quick Color Bar (always visible) */}
+                  <div className="mt-3 glass-panel rounded-xl p-3">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+                      Quick Mockup Colors
+                    </div>
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {allColors.map(c => (
+                        <button
+                          key={c.name}
+                          onClick={() => setSelectedColor(c.name)}
+                          className={`shrink-0 w-9 h-9 rounded-xl border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-105' : 'border-white/10 hover:border-white/30'
+                            }`}
+                          style={{ backgroundColor: c.bg }}
+                          title={c.label}
+                        />
+                      ))}
+                    </div>
+                    <div className="mt-2 text-[10px] text-slate-500">
+                      Pick color instantly (no need to open Settings).
+                    </div>
+                  </div>
+
+                  {/* Download big button (for non-sidebar layouts too) */}
+                  <div className="mt-3 md:hidden">
+                    <button
+                      onClick={downloadImage}
+                      disabled={!cutoutUrl || processing}
+                      className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
+                    >
+                      <Download size={20} /> Download PNG
+                    </button>
+                    <p className="text-[10px] text-center text-slate-600 mt-2">
+                      {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </main>
 
-        {/* Sidebar (Desktop) / Bottom Sheet (Mobile) */}
+        {/* Desktop/Tablet Sidebar (collapsible) */}
         <aside
-          className={`
-            lg:w-80 lg:border-l lg:border-white/5 lg:bg-[#0c0c0f]/90 lg:backdrop-blur-xl
-            lg:static lg:translate-y-0 lg:z-auto
-            fixed inset-x-0 bottom-0 z-40
-            bg-[#0c0c0f]/95 backdrop-blur-xl
-            border-t border-white/10
-            transition-transform duration-300
-            ${mobileSheetOpen ? 'translate-y-0' : 'translate-y-[calc(100%-68px)]'}
-          `}
-          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          className={`hidden md:flex border-l border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl flex-col shrink-0 transition-all duration-200 ease-out
+          ${sidebarOpen ? 'w-[360px]' : 'w-[72px]'}`}
         >
-          {/* Sheet Handle (Mobile) */}
-          <div className="lg:hidden px-4 py-3 flex items-center justify-between">
-            <div className="text-sm font-bold text-white">Settings</div>
+          <div className="p-3 border-b border-white/5 flex items-center justify-between">
+            <div className={`text-xs font-bold text-white/80 ${sidebarOpen ? '' : 'hidden'}`}>
+              Controls
+            </div>
             <button
-              onClick={() => setMobileSheetOpen(o => !o)}
-              className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold transition"
+              onClick={() => setSidebarOpen(s => !s)}
+              className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
+              title={sidebarOpen ? "Collapse" : "Expand"}
             >
-              {mobileSheetOpen ? 'Close' : 'Open'}
+              <ChevronDown size={16} className={`transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
             </button>
           </div>
 
-          <div className="p-5 overflow-y-auto flex-1 space-y-6 max-h-[70dvh] lg:max-h-none">
-            {/* Size Presets */}
-            <section className="glass-panel rounded-xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-                  <Maximize2 size={14} className="text-violet-400" /> Size Preset
-                </h3>
+          <div className={`p-5 overflow-y-auto flex-1 ${sidebarOpen ? '' : 'px-2'}`}>
+            {sidebarOpen ? (
+              <SidebarContent />
+            ) : (
+              <div className="flex flex-col items-center gap-2 pt-2">
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
+                  title="Open panel"
+                >
+                  <Sliders size={18} className="text-violet-300" />
+                </button>
+
+                <button
+                  onClick={downloadImage}
+                  disabled={!cutoutUrl || processing}
+                  className="w-12 h-12 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 flex items-center justify-center"
+                  title="Download PNG"
+                >
+                  <Download size={18} className="text-white" />
+                </button>
+
+                <button
+                  onClick={handlePasteButtonBound}
+                  className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center"
+                  title="Paste"
+                >
+                  <Upload size={18} className="text-violet-300" />
+                </button>
               </div>
+            )}
+          </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { id: 'original', label: 'Original', width: 0, height: 0, desc: 'No resize' },
-                  { id: 'tshirt', label: 'T-Shirt', width: 4500, height: 5400, desc: '4500×5400' },
-                  { id: 'hoodie', label: 'Hoodie', width: 4500, height: 4800, desc: '4500×4800' },
-                  { id: 'mug', label: 'Mug 11oz', width: 2700, height: 1100, desc: '2700×1100' },
-                  { id: 'poster', label: 'Poster 18×24', width: 5400, height: 7200, desc: '5400×7200', pro: true },
-                  { id: 'phone', label: 'Phone Case', width: 1300, height: 2000, desc: '1300×2000' },
-                ].map(preset => {
-                  const needsPro = preset.pro && !isPro;
-                  return (
-                    <button
-                      key={preset.id}
-                      onClick={() => {
-                        if (needsPro) { setShowProModal(true); return; }
-                        setSelectedPreset(preset.id);
-                        setTargetDimensions({ width: preset.width, height: preset.height });
-                        setShowCustomInput(false);
-                      }}
-                      className={`py-2.5 px-2 rounded-lg text-center transition-all relative ${selectedPreset === preset.id && !showCustomInput
-                        ? 'bg-violet-600 text-white'
-                        : needsPro
-                          ? 'bg-slate-800/50 text-slate-500'
-                          : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-                        }`}
-                    >
-                      {needsPro && <Lock size={10} className="absolute top-1 right-1 text-slate-600" />}
-                      <div className="font-semibold text-xs">{preset.label}</div>
-                      <div className="text-[9px] opacity-70">{preset.desc}</div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Custom size */}
-              <button
-                onClick={() => {
-                  setShowCustomInput(!showCustomInput);
-                  if (!showCustomInput) setSelectedPreset('custom');
-                }}
-                className={`w-full mt-2 py-2.5 px-3 rounded-lg text-center transition-all ${showCustomInput ? 'bg-violet-600 text-white' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-                  }`}
-              >
-                <div className="font-semibold text-xs">Custom Size</div>
-                <div className="text-[9px] opacity-70">Up to {MAX_DIMENSION}×{MAX_DIMENSION}px</div>
-              </button>
-
-              {showCustomInput && (
-                <div className="mt-3 space-y-2">
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <label className="text-[10px] text-slate-500 mb-1 block">Width</label>
-                      <input
-                        type="number"
-                        value={customWidth}
-                        onChange={(e) => setCustomWidth(e.target.value)}
-                        placeholder="4500"
-                        max={MAX_DIMENSION}
-                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-                      />
-                    </div>
-                    <div className="flex items-end pb-2 text-slate-500">×</div>
-                    <div className="flex-1">
-                      <label className="text-[10px] text-slate-500 mb-1 block">Height</label>
-                      <input
-                        type="number"
-                        value={customHeight}
-                        onChange={(e) => setCustomHeight(e.target.value)}
-                        placeholder="5400"
-                        max={MAX_DIMENSION}
-                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      const w = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customWidth) || 0));
-                      const h = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customHeight) || 0));
-                      if (w > 0 && h > 0) setTargetDimensions({ width: w, height: h });
-                    }}
-                    className="w-full py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-xs font-medium text-white transition-all"
-                  >
-                    Apply Custom Size
-                  </button>
-                </div>
-              )}
-            </section>
-
-            {/* Colors */}
-            <section>
-              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Mockup Colors</h3>
-              <div className="mb-4">
-                <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Moon size={10} /> Dark</span>
-                <div className="grid grid-cols-6 gap-2">
-                  {shirtColors.dark.map(c => (
-                    <button
-                      key={c.name}
-                      onClick={() => setSelectedColor(c.name)}
-                      title={c.label}
-                      className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
-                        }`}
-                      style={{ backgroundColor: c.bg }}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1"><Sun size={10} /> Light</span>
-                <div className="grid grid-cols-6 gap-2">
-                  {shirtColors.light.map(c => (
-                    <button
-                      key={c.name}
-                      onClick={() => setSelectedColor(c.name)}
-                      title={c.label}
-                      className={`h-9 rounded-lg border-2 transition-all ${selectedColor === c.name ? 'border-violet-500 scale-110 shadow-lg shadow-violet-500/20' : 'border-transparent hover:border-white/20'
-                        }`}
-                      style={{ backgroundColor: c.bg }}
-                    />
-                  ))}
-                </div>
-              </div>
-            </section>
-
-            {/* Print Simulation */}
-            <section>
-              <button onClick={() => setSettingsOpen(!settingsOpen)} className="w-full flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">
-                <span className="flex items-center gap-2">
-                  <Sliders size={12} /> Print Simulation
-                </span>
-                <ChevronDown size={14} className={`transition-transform ${settingsOpen ? 'rotate-180' : ''}`} />
-              </button>
-
-              {settingsOpen && (
-                <div className="space-y-5">
-                  {[
-                    { label: 'Saturation', key: 'saturationReduction', min: 0.5, max: 1 },
-                    { label: 'Brightness', key: 'darknessIncrease', min: 0.6, max: 1 },
-                    { label: 'Contrast', key: 'contrastReduction', min: 0.7, max: 1 },
-                  ].map(s => (
-                    <div key={s.key} className={`${!originalFile ? 'opacity-40 pointer-events-none' : ''}`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs text-slate-300 font-medium">{s.label}</span>
-                        <span className="text-xs font-mono text-violet-400 bg-slate-800/50 px-2 py-0.5 rounded tabular-nums">
-                          {Math.round(podSettings[s.key] * 100)}
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min={s.min}
-                        max={s.max}
-                        step={0.01}
-                        value={podSettings[s.key]}
-                        onChange={(e) => setPodSettings(p => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
-                        disabled={!originalFile}
-                        className="w-full h-2 bg-slate-800 rounded-full appearance-none cursor-pointer
-                          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5 
-                          [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500 
-                          [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-violet-500/30
-                          [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:active:cursor-grabbing
-                          [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110
-                          [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full 
-                          [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
-                        style={{ touchAction: 'none' }}
-                      />
-                    </div>
-                  ))}
-
-                  <div className="flex gap-2">
-                    <button onClick={simulatePrint} disabled={!originalFile} className="flex-1 py-2 bg-violet-600/20 hover:bg-violet-600/30 text-violet-400 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1.5 disabled:opacity-40">
-                      <Shirt size={12} /> Simulate Print
-                    </button>
-                    <button onClick={resetSettings} disabled={!originalFile} className="flex-1 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-medium text-slate-400 flex items-center justify-center gap-1.5 disabled:opacity-40">
-                      <RotateCcw size={12} /> Reset 100%
-                    </button>
-                  </div>
-                </div>
-              )}
-            </section>
-
-            {/* Download (inside sheet scroll) */}
-            <div className="lg:hidden p-0">
+          {sidebarOpen && (
+            <div className="p-5 bg-[#08080a] border-t border-white/5">
               <button
                 onClick={downloadImage}
                 disabled={!cutoutUrl || processing}
@@ -1688,53 +1874,81 @@ export default function App() {
                 {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
               </p>
             </div>
-          </div>
-
-          {/* Download (Desktop Footer) */}
-          <div className="hidden lg:block p-5 bg-[#08080a] border-t border-white/5">
-            <button
-              onClick={downloadImage}
-              disabled={!cutoutUrl || processing}
-              className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
-            >
-              <Download size={20} /> Download PNG
-            </button>
-            <p className="text-[10px] text-center text-slate-600 mt-3">
-              {isPro ? 'Export enhancement enabled • PNG with transparency' : 'Free tier'}
-            </p>
-          </div>
+          )}
         </aside>
       </div>
 
-      {/* Mobile Bottom Bar */}
-      {originalImage && (
-        <div className="lg:hidden fixed inset-x-0 bottom-0 z-50 px-3 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
-          <div className="glass-panel rounded-2xl p-2 flex gap-2">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex-1 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm flex items-center justify-center gap-2 transition"
-            >
-              <Upload size={16} /> Upload
-            </button>
+      {/* Mobile Settings Drawer */}
+      {mobilePanelOpen && (
+        <div className="md:hidden fixed inset-0 z-50">
+          <div
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => setMobilePanelOpen(false)}
+          />
+          <div className="absolute bottom-0 left-0 right-0 max-h-[85vh] rounded-t-3xl bg-[#0c0c0f] border-t border-white/10 overflow-hidden">
+            <div className="p-4 flex items-center justify-between border-b border-white/10">
+              <div className="text-white font-bold">Settings</div>
+              <button
+                onClick={() => setMobilePanelOpen(false)}
+                className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
+              >
+                <X size={18} />
+              </button>
+            </div>
 
-            <button
-              onClick={downloadImage}
-              disabled={!cutoutUrl || processing}
-              className="flex-1 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 text-white font-bold text-sm flex items-center justify-center gap-2 transition"
-            >
-              <Download size={16} /> Download
-            </button>
+            <div className="p-4 overflow-y-auto">
+              <SidebarContent dense />
+            </div>
 
-            <button
-              onClick={() => setMobileSheetOpen(true)}
-              className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm flex items-center justify-center transition"
-              title="Settings"
-            >
-              <Sliders size={16} />
-            </button>
+            <div className="p-4 border-t border-white/10 bg-[#08080a]">
+              <button
+                onClick={() => { setMobilePanelOpen(false); downloadImage(); }}
+                disabled={!cutoutUrl || processing}
+                className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2"
+              >
+                <Download size={18} /> Download PNG
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+      {/* Mobile Bottom Bar */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/90 backdrop-blur-xl">
+        <div className="p-2 flex items-center gap-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm"
+          >
+            Upload
+          </button>
+
+          <button
+            onClick={handlePasteButtonBound}
+            className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
+          >
+            Paste
+          </button>
+
+          <button
+            onClick={() => setMobilePanelOpen(true)}
+            className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm"
+          >
+            Settings
+          </button>
+
+          <button
+            onClick={downloadImage}
+            disabled={!cutoutUrl || processing}
+            className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40"
+          >
+            PNG
+          </button>
+        </div>
+      </div>
+
+      {/* Spacer so content won't hide behind bottom bar */}
+      <div className="md:hidden h-20" />
     </div>
   );
 }
