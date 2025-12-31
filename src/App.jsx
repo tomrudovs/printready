@@ -25,6 +25,9 @@ import {
   ListPlus,
   Trash2,
   Layers,
+  Square,
+  CheckSquare,
+  Package,
 } from "lucide-react";
 
 /* ===================== HELPERS ===================== */
@@ -77,99 +80,160 @@ function downloadBlob(blob, filename) {
   }, 1500);
 }
 
-const tick = () =>
-  new Promise((r) => {
-    requestAnimationFrame(() => r());
-  });
+const tick = () => new Promise((r) => requestAnimationFrame(() => r()));
 
-/* ===================== CSS FILTERS (instant preview) ===================== */
-const getCssFilters = (settings) => ({
-  filter: `saturate(${settings.saturationReduction}) brightness(${settings.darknessIncrease}) contrast(${settings.contrastReduction})`,
-  willChange: "filter",
-});
+/* ===================== PRINT SIMULATION (RGB -> CMYK -> RGB) ===================== */
+/**
+ * NOTE: PNG exports are RGB. This simulation is a practical POD preview:
+ * - Convert RGB to CMYK
+ * - Apply ink limit + mild dot gain
+ * - Convert back to RGB for preview/export
+ */
+function rgbToCmyk(r, g, b) {
+  const R = r / 255,
+    G = g / 255,
+    B = b / 255;
+  const K = 1 - Math.max(R, G, B);
+  if (K >= 0.999) return { c: 0, m: 0, y: 0, k: 1 };
+  const C = (1 - R - K) / (1 - K);
+  const M = (1 - G - K) / (1 - K);
+  const Y = (1 - B - K) / (1 - K);
+  return {
+    c: clamp(C, 0, 1),
+    m: clamp(M, 0, 1),
+    y: clamp(Y, 0, 1),
+    k: clamp(K, 0, 1),
+  };
+}
 
-/* ===================== PRINT ANALYSIS (AUTO SIMULATE) ===================== */
-function analyzeForPrint(imgData) {
+function cmykToRgb(c, m, y, k) {
+  const R = 255 * (1 - c) * (1 - k);
+  const G = 255 * (1 - m) * (1 - k);
+  const B = 255 * (1 - y) * (1 - k);
+  return { r: clamp(R, 0, 255), g: clamp(G, 0, 255), b: clamp(B, 0, 255) };
+}
+
+/**
+ * settings:
+ * - enabled: boolean
+ * - inkLimit: 1.6..3.0 (sum(CMYK) cap)
+ * - gain: 0..0.18 (dot gain feel)
+ * - vibrance: 0.75..1.0 (slight desat like fabric/ink)
+ */
+function applyCmykSimulation(pixels, settings) {
+  if (!settings?.enabled) return;
+
+  const inkLimit = clamp(settings.inkLimit ?? 2.2, 1.6, 3.0);
+  const gain = clamp(settings.gain ?? 0.08, 0, 0.18);
+  const vibrance = clamp(settings.vibrance ?? 0.90, 0.75, 1);
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    const a = pixels[i + 3];
+    if (a < 5) continue;
+
+    const r0 = pixels[i],
+      g0 = pixels[i + 1],
+      b0 = pixels[i + 2];
+
+    // preserve near-black line-art feel
+    const luma = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+
+    // RGB -> CMYK
+    let { c, m, y, k } = rgbToCmyk(r0, g0, b0);
+
+    // ink limit
+    const total = c + m + y + k;
+    if (total > inkLimit) {
+      const s = inkLimit / total;
+      c *= s;
+      m *= s;
+      y *= s;
+      k *= s;
+    }
+
+    // dot gain: push K a bit, but not too much on highlights
+    const hl = clamp((luma - 180) / 75, 0, 1);
+    const kBoost = gain * (1 - hl);
+    k = clamp(k + kBoost, 0, 1);
+
+    // mild fabric desat (reduce C/M/Y a touch)
+    c *= vibrance;
+    m *= vibrance;
+    y *= vibrance;
+
+    // CMYK -> RGB
+    const rgb = cmykToRgb(c, m, y, k);
+    pixels[i] = rgb.r;
+    pixels[i + 1] = rgb.g;
+    pixels[i + 2] = rgb.b;
+  }
+}
+
+/* ===================== CONTENT ANALYSIS (AUTO) ===================== */
+function analyzeForAuto(imgData) {
   const d = imgData.data;
   let n = 0;
   let satSum = 0,
     satCount = 0;
   let lumaSum = 0;
-  let dark = 0,
-    bright = 0;
   let grayish = 0;
 
   for (let i = 0; i < d.length; i += 4) {
     const a = d[i + 3];
     if (a < 10) continue;
+
     const r = d[i],
       g = d[i + 1],
       b = d[i + 2];
     const max = Math.max(r, g, b);
     const min = Math.min(r, g, b);
-    const sat = max ? (max - min) / max : 0; // 0..1
-    const luma = 0.299 * r + 0.587 * g + 0.114 * b; // 0..255
+    const sat = max ? (max - min) / max : 0;
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
 
     satSum += sat;
     satCount++;
     lumaSum += luma;
     n++;
 
-    if (luma < 60) dark++;
-    if (luma > 210) bright++;
-
     if (Math.abs(r - g) < 10 && Math.abs(g - b) < 10) grayish++;
   }
 
   const avgSat = satCount ? satSum / satCount : 0;
   const avgLuma = n ? lumaSum / n : 128;
-  const darkRatio = n ? dark / n : 0;
-  const brightRatio = n ? bright / n : 0;
   const grayRatio = n ? grayish / n : 0;
 
   const isMostlyGray = grayRatio > 0.55 && avgSat < 0.12;
   const isColorful = avgSat > 0.18 && grayRatio < 0.55;
 
-  return { avgSat, avgLuma, darkRatio, brightRatio, grayRatio, isMostlyGray, isColorful };
+  return { avgSat, avgLuma, grayRatio, isMostlyGray, isColorful };
 }
 
-function autoSimulateSettings(metrics, isDarkShirt, isLineArt) {
-  // defaults that look good “by default”
-  let saturationReduction = 0.90;
-  let darknessIncrease = 0.92; // (brightness)
-  let contrastReduction = 0.93;
+function autoSimulateFromMetrics(metrics, isDarkShirt, isLineArt) {
+  // practical POD defaults
+  let enabled = true;
+  let inkLimit = 2.2;
+  let gain = isDarkShirt ? 0.06 : 0.09;
+  let vibrance = 0.90;
 
   if (isLineArt || metrics.isMostlyGray) {
-    // keep blacks strong, don’t desaturate
-    saturationReduction = 1.0;
-    darknessIncrease = isDarkShirt ? 0.95 : 0.92;
-    contrastReduction = 0.96;
+    inkLimit = isDarkShirt ? 2.0 : 2.15;
+    gain = isDarkShirt ? 0.05 : 0.08;
+    vibrance = 0.96; // don't kill line-art blacks/gray
   } else if (metrics.isColorful) {
-    // printed colors are usually less punchy
-    saturationReduction = isDarkShirt ? 0.86 : 0.90;
-    darknessIncrease = isDarkShirt ? 0.95 : 0.92;
-    contrastReduction = isDarkShirt ? 0.94 : 0.92;
+    inkLimit = isDarkShirt ? 2.05 : 2.2;
+    gain = isDarkShirt ? 0.06 : 0.10;
+    vibrance = isDarkShirt ? 0.88 : 0.90;
   }
 
-  // lots of dark content? avoid over-darkening
-  if (metrics.darkRatio > 0.35) {
-    darknessIncrease = Math.min(0.98, darknessIncrease + 0.03);
-    contrastReduction = Math.min(0.98, contrastReduction + 0.02);
-  }
+  // very bright art: avoid too much dot gain
+  if (metrics.avgLuma > 190) gain = Math.max(0.04, gain - 0.02);
 
-  // lots of bright highlights? slightly reduce brightness to mimic ink-on-fabric
-  if (metrics.brightRatio > 0.25) {
-    darknessIncrease = Math.max(0.88, darknessIncrease - 0.02);
-  }
-
-  return { saturationReduction, darknessIncrease, contrastReduction };
+  return { enabled, inkLimit, gain, vibrance };
 }
 
-/* ===================== FAST “GIGAPIXEL-ISH” PROCESSOR ===================== */
+/* ===================== FAST CUTOUT + EXPORT ENGINE ===================== */
 const FastImageProcessor = {
-  clamp(n, a, b) {
-    return Math.max(a, Math.min(b, n));
-  },
+  clamp,
 
   detectBackground(imageData) {
     const { data, width, height } = imageData;
@@ -233,15 +297,18 @@ const FastImageProcessor = {
         const sat = max - min;
         const luma = r * 0.299 + g * 0.587 + b * 0.114;
 
+        // remove near-white background
         if (luma > 245 && sat < 15) {
           data[i + 3] = 0;
           continue;
         }
 
+        // keep colored pixels
         if (sat > 16) {
           if (luma > 230) data[i + 3] = Math.max(0, 255 - (luma - 230) * 10);
           else data[i + 3] = 255;
         } else {
+          // gray-ish -> black ink
           let alpha = 255 - luma;
           if (luma > 215) alpha = 0;
           else alpha = Math.min(255, alpha * 1.4);
@@ -252,6 +319,7 @@ const FastImageProcessor = {
         }
       }
     } else {
+      // pure sketch mode
       for (let i = 0; i < len; i += 4) {
         const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
         if (gray > 225) data[i + 3] = 0;
@@ -267,11 +335,12 @@ const FastImageProcessor = {
   },
 
   async classify(canvas) {
+    // lightweight classifier: if low avg saturation => line-art-ish
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
       h = canvas.height;
-    const chunkW = Math.min(120, w),
-      chunkH = Math.min(120, h);
+    const chunkW = Math.min(140, w),
+      chunkH = Math.min(140, h);
     const img = ctx.getImageData((w - chunkW) / 2, (h - chunkH) / 2, chunkW, chunkH);
     const d = img.data;
 
@@ -289,21 +358,7 @@ const FastImageProcessor = {
     return { isLineArt: avgSat < 15 };
   },
 
-  addFilmGrain(canvas, strength = 3) {
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] < 30) continue;
-      const noise = (Math.random() - 0.5) * strength;
-      data[i] = this.clamp(data[i] + noise, 0, 255);
-      data[i + 1] = this.clamp(data[i + 1] + noise, 0, 255);
-      data[i + 2] = this.clamp(data[i + 2] + noise, 0, 255);
-    }
-    ctx.putImageData(imgData, 0, 0);
-  },
-
+  // ---------- Quality tools ----------
   fastBlur(data, width, height, radius) {
     const len = width * height * 4;
     const rad = Math.floor(radius);
@@ -362,13 +417,55 @@ const FastImageProcessor = {
     return final;
   },
 
-  deblockLite(canvas, strength = 0.38, flatThreshold = 18) {
+  casSharpen(canvas, strength = 0.7) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
       h = canvas.height;
     const img = ctx.getImageData(0, 0, w, h);
     const d = img.data;
-    const s = this.clamp(strength, 0, 1);
+    const out = new Uint8ClampedArray(d.length);
+    const s = clamp(strength, 0, 1);
+    const idx = (x, y) => ((y * w + x) << 2);
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = idx(x, y);
+        const a = d[i + 3];
+        if (a < 20) {
+          out[i + 3] = a;
+          continue;
+        }
+
+        const xm = x > 0 ? x - 1 : x,
+          xp = x < w - 1 ? x + 1 : x;
+        const ym = y > 0 ? y - 1 : y,
+          yp = y < h - 1 ? y + 1 : y;
+        const iL = idx(xm, y),
+          iR = idx(xp, y),
+          iU = idx(x, ym),
+          iD = idx(x, yp);
+
+        for (let c = 0; c < 3; c++) {
+          const center = d[i + c];
+          const avg = (d[iL + c] + d[iR + c] + d[iU + c] + d[iD + c]) * 0.25;
+          const v = center + (center - avg) * (0.75 + s * 0.9);
+          out[i + c] = clamp(v, 0, 255);
+        }
+        out[i + 3] = a;
+      }
+    }
+
+    img.data.set(out);
+    ctx.putImageData(img, 0, 0);
+  },
+
+  deblockLite(canvas, strength = 0.42, flatThreshold = 18) {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const w = canvas.width,
+      h = canvas.height;
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const s = clamp(strength, 0, 1);
 
     const idx = (x, y) => ((y * w + x) << 2);
     const lumaAt = (j) => d[j] * 0.299 + d[j + 1] * 0.587 + d[j + 2] * 0.114;
@@ -392,7 +489,7 @@ const FastImageProcessor = {
         if (range < flatThreshold) {
           for (let ch = 0; ch < 3; ch++) {
             const avg = (d[iL + ch] + d[iR + ch] + d[iU + ch] + d[iD + ch]) * 0.25;
-            d[i + ch] = this.clamp(d[i + ch] * (1 - s) + avg * s, 0, 255);
+            d[i + ch] = clamp(d[i + ch] * (1 - s) + avg * s, 0, 255);
           }
         }
       }
@@ -400,15 +497,15 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  cheapDenoise(canvas, strength = 0.42) {
-    const s = this.clamp(strength, 0, 0.85);
+  cheapDenoise(canvas, strength = 0.45) {
+    const s = clamp(strength, 0, 0.85);
     if (s <= 0.001) return;
 
     const w = canvas.width,
       h = canvas.height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-    const ds = this.clamp(1 - s, 0.35, 0.85);
+    const ds = clamp(1 - s, 0.35, 0.85);
     const dw = Math.max(1, Math.round(w * ds));
     const dh = Math.max(1, Math.round(h * ds));
 
@@ -429,87 +526,19 @@ const FastImageProcessor = {
     tmp.width = 0;
   },
 
-  smartSharpen(canvas, amount, radius) {
-    const w = canvas.width,
-      h = canvas.height;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const blurred = this.fastBlur(imgData.data, w, h, radius);
-    const d = imgData.data;
-
-    for (let i = 0; i < d.length; i += 4) {
-      if (d[i + 3] < 20) continue;
-      for (let c = 0; c < 3; c++) {
-        const val = d[i + c];
-        d[i + c] = this.clamp(val + (val - blurred[i + c]) * amount, 0, 255);
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-  },
-
-  casSharpen(canvas, strength = 0.7) {
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const w = canvas.width,
-      h = canvas.height;
-    const img = ctx.getImageData(0, 0, w, h);
-    const d = img.data;
-    const out = new Uint8ClampedArray(d.length);
-    const s = this.clamp(strength, 0, 1);
-    const idx = (x, y) => ((y * w + x) << 2);
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = idx(x, y);
-        const a = d[i + 3];
-        if (a < 20) {
-          out[i + 3] = a;
-          continue;
-        }
-
-        const xm = x > 0 ? x - 1 : x,
-          xp = x < w - 1 ? x + 1 : x;
-        const ym = y > 0 ? y - 1 : y,
-          yp = y < h - 1 ? y + 1 : y;
-        const iL = idx(xm, y),
-          iR = idx(xp, y),
-          iU = idx(x, ym),
-          iD = idx(x, yp);
-
-        for (let c = 0; c < 3; c++) {
-          const center = d[i + c];
-          const mn = Math.min(d[iL + c], d[iR + c], d[iU + c], d[iD + c], center);
-          const mx = Math.max(d[iL + c], d[iR + c], d[iU + c], d[iD + c], center);
-          const range = mx - mn;
-          const k = range > 0 ? s * (range / 255) : 0;
-          const avg = (d[iL + c] + d[iR + c] + d[iU + c] + d[iD + c]) * 0.25;
-          const v = center + (center - avg) * (0.75 + k);
-          out[i + c] = this.clamp(v, 0, 255);
-        }
-        out[i + 3] = a;
-      }
-    }
-
-    img.data.set(out);
-    ctx.putImageData(img, 0, 0);
-  },
-
-  // Ink boost to prevent “washed” blacks on light backgrounds
-  inkBoostAlpha(canvas, power = 0.78) {
+  cleanupAlpha(canvas) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const d = img.data;
-
     for (let i = 0; i < d.length; i += 4) {
       const a = d[i + 3];
-      if (a < 10 || a > 250) continue;
-      const x = a / 255;
-      const boosted = Math.pow(x, power);
-      d[i + 3] = Math.round(boosted * 255);
+      if (a < 8) d[i + 3] = 0;
+      else if (a > 247) d[i + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
   },
 
-  // Better resampling ladder (still fast)
+  // Better resampling ladder; HQ uses smaller steps
   upscale(sourceCanvas, targetW, targetH, mode = "auto", quality = "auto") {
     if (targetW <= sourceCanvas.width) {
       const copy = document.createElement("canvas");
@@ -527,9 +556,14 @@ const FastImageProcessor = {
     const isSmall = Math.max(sourceCanvas.width, sourceCanvas.height) <= 900;
     const preferNearest = mode === "nearest" || (mode === "auto" && isSmall);
 
-    // smaller steps => better quality; still fast enough
     const stepMul =
-      quality === "hq" ? 1.45 : scale >= 6 ? 1.5 : scale >= 3 ? 1.65 : 1.8;
+      quality === "hq"
+        ? 1.32
+        : scale >= 6
+        ? 1.5
+        : scale >= 3
+        ? 1.65
+        : 1.8;
 
     let current = sourceCanvas;
     let curW = current.width;
@@ -559,72 +593,7 @@ const FastImageProcessor = {
     return final;
   },
 
-  cleanupAlpha(canvas) {
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const a = d[i + 3];
-      if (a < 8) d[i + 3] = 0;
-      else if (a > 247) d[i + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-  },
-
-  quantizeBitDepth(canvas, mode = "555") {
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = img.data;
-    const is565 = mode === "565";
-
-    for (let i = 0; i < d.length; i += 4) {
-      if (d[i + 3] < 10) continue;
-      if (is565) {
-        d[i] = d[i] & 0xf8;
-        d[i + 1] = d[i + 1] & 0xfc;
-        d[i + 2] = d[i + 2] & 0xf8;
-      } else {
-        d[i] = d[i] & 0xf8;
-        d[i + 1] = d[i + 1] & 0xf8;
-        d[i + 2] = d[i + 2] & 0xf8;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-  },
-
-  applyPodSimulation(pixels, podSettings) {
-    const sat = clamp(podSettings?.saturationReduction ?? 1, 0.2, 1);
-    const bright = clamp(podSettings?.darknessIncrease ?? 1, 0.2, 2);
-    const contrast = clamp(podSettings?.contrastReduction ?? 1, 0.2, 2);
-
-    for (let i = 0; i < pixels.length; i += 4) {
-      const a = pixels[i + 3];
-      if (a < 5) continue;
-
-      let r = pixels[i],
-        g = pixels[i + 1],
-        b = pixels[i + 2];
-      const gray = r * 0.299 + g * 0.587 + b * 0.114;
-
-      r = gray + (r - gray) * sat;
-      g = gray + (g - gray) * sat;
-      b = gray + (b - gray) * sat;
-
-      r *= bright;
-      g *= bright;
-      b *= bright;
-
-      r = (r - 128) * contrast + 128;
-      g = (g - 128) * contrast + 128;
-      b = (b - 128) * contrast + 128;
-
-      pixels[i] = clamp(r, 0, 255);
-      pixels[i + 1] = clamp(g, 0, 255);
-      pixels[i + 2] = clamp(b, 0, 255);
-    }
-  },
-
-  async createCutoutBlobUrl(file) {
+  async createCutoutFromFile(file) {
     const img = new Image();
     img.src = URL.createObjectURL(file);
     await new Promise((r) => (img.onload = r));
@@ -668,11 +637,10 @@ const FastImageProcessor = {
     cutoutH,
     targetW,
     targetH,
-    podSettings,
+    simulationSettings,
     classification,
     quality = "auto",
     stageCb,
-    inkBoost = true,
   }) {
     const start = performance.now();
     const setStage = async (s) => {
@@ -708,10 +676,12 @@ const FastImageProcessor = {
     const isUpscale = scale > 1.15;
     const s = scale;
 
-    const denoiseStrength = s >= 8 ? 0.60 : s >= 6 ? 0.54 : s >= 4 ? 0.44 : 0.28;
-    const casStrength = s >= 8 ? 0.84 : s >= 6 ? 0.80 : s >= 4 ? 0.72 : 0.62;
-    const deblockStrength = s >= 8 ? 0.52 : s >= 6 ? 0.46 : s >= 4 ? 0.40 : 0.32;
-    const flatThr = s >= 8 ? 22 : s >= 6 ? 20 : 18;
+    // Make HQ actually different
+    const hq = quality === "hq";
+    const denoiseStrength = hq ? (s >= 4 ? 0.56 : 0.42) : s >= 4 ? 0.44 : 0.30;
+    const casStrength = hq ? (s >= 4 ? 0.86 : 0.74) : s >= 4 ? 0.72 : 0.62;
+    const deblockStrength = hq ? (s >= 4 ? 0.52 : 0.42) : s >= 4 ? 0.40 : 0.32;
+    const flatThr = hq ? (s >= 4 ? 22 : 20) : s >= 4 ? 20 : 18;
 
     if (isUpscale) {
       await setStage("Deblocking…");
@@ -723,17 +693,15 @@ const FastImageProcessor = {
       await setStage("Sharpening…");
       this.casSharpen(upscaledCanvas, casStrength);
 
-      if (!isLineArt && s < 6) this.smartSharpen(upscaledCanvas, 0.22, 1.05);
-      if (s < 6) this.addFilmGrain(upscaledCanvas, isLineArt ? 2 : 3);
+      // HQ extra pass for photos
+      if (hq && !isLineArt) {
+        await setStage("Refining…");
+        this.deblockLite(upscaledCanvas, 0.22, 16);
+        this.casSharpen(upscaledCanvas, 0.55);
+      }
     } else if (isLineArt) {
       await setStage("Sharpening…");
-      this.casSharpen(upscaledCanvas, 0.58);
-    }
-
-    // Optional: ink boost to keep blacks from looking washed
-    if (inkBoost && isLineArt) {
-      await setStage("Ink boost…");
-      this.inkBoostAlpha(upscaledCanvas, 0.78);
+      this.casSharpen(upscaledCanvas, hq ? 0.66 : 0.58);
     }
 
     await setStage("Compositing…");
@@ -744,21 +712,16 @@ const FastImageProcessor = {
     const dx = Math.round((tW - finalW) / 2);
     const dy = Math.round((tH - finalH) / 2);
     ctx.drawImage(upscaledCanvas, dx, dy);
-    if (upscaledCanvas) upscaledCanvas.width = 0;
+    upscaledCanvas.width = 0;
 
-    if (
-      podSettings?.saturationReduction < 1 ||
-      podSettings?.darknessIncrease < 1 ||
-      podSettings?.contrastReduction < 1
-    ) {
-      await setStage("Applying print simulation…");
+    if (simulationSettings?.enabled) {
+      await setStage("Simulating print…");
       const data = ctx.getImageData(0, 0, tW, tH);
-      this.applyPodSimulation(data.data, podSettings);
+      applyCmykSimulation(data.data, simulationSettings);
       ctx.putImageData(data, 0, 0);
     }
 
     this.cleanupAlpha(out);
-    if (scale >= 3) this.quantizeBitDepth(out, isLineArt ? "555" : "565");
 
     await setStage("Encoding PNG…");
     const blob = await new Promise((resolve, reject) => {
@@ -788,7 +751,7 @@ function Toast({ toast, onClose }) {
           }`}
         />
         <div className="text-sm text-slate-200 leading-snug">{toast.msg}</div>
-        <button onClick={onClose} className="ml-2 text-slate-400 hover:text-white">
+        <button type="button" onClick={onClose} className="ml-2 text-slate-400 hover:text-white">
           <X size={16} />
         </button>
       </div>
@@ -837,7 +800,6 @@ function usePinchPanZoom({ minZoom = 0.6, maxZoom = 6, defaultZoom = 1.12 } = {}
         return;
       }
 
-      // Pan only if zoomed
       if (pts.length === 1 && zoom > 1.03) {
         gesture.current.mode = "pan";
         gesture.current.panStart = { x: e.clientX - pan.x, y: e.clientY - pan.y };
@@ -892,7 +854,7 @@ function usePinchPanZoom({ minZoom = 0.6, maxZoom = 6, defaultZoom = 1.12 } = {}
   const onWheel = useCallback(
     (e) => {
       e.preventDefault();
-      const step = (e.ctrlKey || e.metaKey) ? 0.22 : 0.12;
+      const step = e.ctrlKey || e.metaKey ? 0.22 : 0.12;
       const dir = e.deltaY > 0 ? -step : step;
       setZoom((z) => clamp(z + dir, minZoom, maxZoom));
     },
@@ -910,8 +872,6 @@ function usePinchPanZoom({ minZoom = 0.6, maxZoom = 6, defaultZoom = 1.12 } = {}
   return {
     zoom,
     pan,
-    setZoom,
-    setPan,
     onPointerDown,
     onPointerMove,
     onPointerUp,
@@ -966,15 +926,15 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
       />
 
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/65 backdrop-blur-md rounded-full px-2 py-1.5 shadow-xl border border-white/10">
-        <button onClick={zoomOut} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom out">
+        <button type="button" onClick={zoomOut} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom out">
           <ZoomOut size={16} />
         </button>
         <span className="px-3 min-w-[62px] text-center text-xs font-mono text-white/90">{Math.round(zoom * 100)}%</span>
-        <button onClick={zoomIn} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom in">
+        <button type="button" onClick={zoomIn} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom in">
           <ZoomIn size={16} />
         </button>
         <div className="w-px h-5 bg-white/20 mx-1" />
-        <button onClick={reset} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Reset view">
+        <button type="button" onClick={reset} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Reset view">
           <RotateCcw size={16} />
         </button>
       </div>
@@ -988,7 +948,7 @@ function ZoomableImage({ src, alt, className, containerClassName, style = {}, de
   );
 }
 
-/* ===================== COMPARE VIEW (always transparent grid) ===================== */
+/* ===================== COMPARE VIEW ===================== */
 function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
   const [pos, setPos] = useState(50);
   const draggingSlider = useRef(false);
@@ -1045,7 +1005,6 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
       onPointerLeave={onPointerUp}
       onDoubleClick={toggleQuickZoom}
     >
-      {/* Transform wrapper */}
       <div
         className="absolute inset-0"
         style={{
@@ -1054,12 +1013,10 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
           willChange: "transform",
         }}
       >
-        {/* AFTER (transparent cutout) */}
         <div className="absolute inset-0 flex items-center justify-center">
-          <img src={afterSrc} alt="Cutout" draggable={false} className="w-full h-full object-contain drop-shadow-2xl" style={afterStyle} />
+          <img src={afterSrc} alt="Transparent" draggable={false} className="w-full h-full object-contain drop-shadow-2xl" style={afterStyle} />
         </div>
 
-        {/* BEFORE clipped */}
         <div className="absolute inset-0" style={{ clipPath: `inset(0 ${clipRight}% 0 0)` }}>
           <div className="absolute inset-0 flex items-center justify-center">
             <img src={beforeSrc} alt="Original" draggable={false} className="w-full h-full object-contain drop-shadow-2xl" />
@@ -1067,7 +1024,6 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
         </div>
       </div>
 
-      {/* Slider line */}
       <div
         className="absolute top-0 bottom-0 w-0.5 bg-white/80 shadow-lg z-20"
         style={{ left: `${pos}%`, transform: "translateX(-50%)" }}
@@ -1110,7 +1066,6 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
         </div>
       </div>
 
-      {/* Labels */}
       <div className="absolute top-2 left-2 bg-black/65 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] text-white/90 font-medium z-30">
         Original
       </div>
@@ -1118,17 +1073,16 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
         Transparent
       </div>
 
-      {/* Controls */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/65 backdrop-blur-md rounded-full px-2 py-1.5 shadow-xl border border-white/10 z-30">
-        <button onClick={zoomOut} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom out">
+        <button type="button" onClick={zoomOut} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom out">
           <ZoomOut size={16} />
         </button>
         <span className="px-3 min-w-[62px] text-center text-xs font-mono text-white/90">{Math.round(zoom * 100)}%</span>
-        <button onClick={zoomIn} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom in">
+        <button type="button" onClick={zoomIn} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Zoom in">
           <ZoomIn size={16} />
         </button>
         <div className="w-px h-5 bg-white/20 mx-1" />
-        <button onClick={reset} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Reset view">
+        <button type="button" onClick={reset} className="p-2 hover:bg-white/10 rounded-full text-white/80 hover:text-white" aria-label="Reset view">
           <RotateCcw size={16} />
         </button>
       </div>
@@ -1155,12 +1109,12 @@ function PreviewFrame({ aspect = 1, children }) {
 function ShortcutsModal({ open, onClose }) {
   if (!open) return null;
   const shortcuts = [
-    { keys: "Ctrl/⌘ + V", desc: "Paste an image from clipboard (desktop)" },
+    { keys: "Ctrl/⌘ + V", desc: "Paste image (desktop, most browsers)" },
     { keys: "Shift + /  ( ? )", desc: "Open/close shortcuts" },
     { keys: "Wheel / Pinch", desc: "Zoom in/out in preview" },
-    { keys: "Double Tap/Click", desc: "Toggle quick zoom (1× ↔ 2×)" },
+    { keys: "Double Tap/Click", desc: "Quick zoom 1× ↔ 2×" },
     { keys: "Drag (zoomed)", desc: "Pan around the image" },
-    { keys: "Compare: drag slider", desc: "Reveal original vs cutout" },
+    { keys: "Compare slider", desc: "Reveal original vs transparent" },
   ];
 
   return (
@@ -1176,7 +1130,7 @@ function ShortcutsModal({ open, onClose }) {
               <div className="text-[11px] text-slate-500">Fast workflow tips</div>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-white/5 text-slate-400 hover:text-white transition" aria-label="Close">
+          <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/5 text-slate-400 hover:text-white transition" aria-label="Close">
             <X size={18} />
           </button>
         </div>
@@ -1193,14 +1147,14 @@ function ShortcutsModal({ open, onClose }) {
             ))}
           </div>
 
-          <div className="mt-5 text-[10px] text-slate-500">Mobile: use the Paste button if supported by your browser.</div>
+          <div className="mt-5 text-[10px] text-slate-500">Mobile: Paste is limited by browser. Upload always works.</div>
         </div>
       </div>
     </div>
   );
 }
 
-/* ===================== MOBILE SETTINGS SHEET (sticky footer) ===================== */
+/* ===================== MOBILE SETTINGS SHEET ===================== */
 function MobileSheet({ open, title, onClose, children, footer }) {
   const startY = useRef(null);
   const dragging = useRef(false);
@@ -1252,7 +1206,7 @@ function MobileSheet({ open, title, onClose, children, footer }) {
           <div className="mx-auto w-12 h-1.5 rounded-full bg-white/10 mb-2" />
           <div className="flex items-center justify-between">
             <div className="text-white font-bold">{title}</div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-white/5 text-slate-300" aria-label="Close settings">
+            <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/5 text-slate-300" aria-label="Close settings">
               <X size={18} />
             </button>
           </div>
@@ -1269,17 +1223,20 @@ function MobileSheet({ open, title, onClose, children, footer }) {
 
 /* ===================== MAIN APP ===================== */
 export default function App() {
-  // treat small tablets as mobile (desktop at lg+)
   const isDesktop = useMediaQuery("(min-width: 1024px)");
 
-  // Batch items
+  // Items
   const [items, setItems] = useState([]); // {id, file, name, originalUrl, cutoutUrl, meta}
   const [activeId, setActiveId] = useState(null);
 
   const activeItem = useMemo(() => items.find((x) => x.id === activeId) || null, [items, activeId]);
   const hasImage = !!activeItem?.originalUrl;
 
-  // UI states
+  // Batch selection (multi-select)
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const selectedCount = selectedIds.size;
+
+  // UI
   const [viewMode, setViewMode] = useState("compare"); // compare | mockup
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
@@ -1291,13 +1248,16 @@ export default function App() {
   const [exportStage, setExportStage] = useState("");
   const processing = cutting || exporting;
 
-  // print simulation controls
-  const [podSettings, setPodSettings] = useState({
-    saturationReduction: 1.0,
-    darknessIncrease: 1.0,
-    contrastReduction: 1.0,
+  // Simulation settings (CMYK preview)
+  const [simulation, setSimulation] = useState({
+    enabled: true,
+    inkLimit: 2.2,
+    gain: 0.08,
+    vibrance: 0.90,
   });
   const [autoSimulateOn, setAutoSimulateOn] = useState(true);
+
+  // Quality
   const [enhanceQuality, setEnhanceQuality] = useState("auto"); // auto | hq
 
   // colors (mockup only)
@@ -1311,7 +1271,7 @@ export default function App() {
   const [showCustomInput, setShowCustomInput] = useState(false);
   const MAX_DIMENSION = 8000;
 
-  // pro gating (keep your logic)
+  // pro gating (kept)
   const [isPro, setIsPro] = useState(false);
   const [showProModal, setShowProModal] = useState(false);
   const FREE_LIMIT = 5;
@@ -1331,7 +1291,6 @@ export default function App() {
   // toast
   const [toast, setToast] = useState(null);
   const showToast = useCallback((msg, type = "ok", ms = 2600) => setToast({ msg, type, ms }), []);
-
   const saveUsage = (count) => {
     try {
       localStorage.setItem("printready_usage", JSON.stringify({ count, date: new Date().toDateString() }));
@@ -1381,149 +1340,172 @@ export default function App() {
   const isLightShirt = useMemo(() => shirtColors.light.some((c) => c.name === selectedColor), [shirtColors, selectedColor]);
   const isDarkShirt = !isLightShirt;
 
-  const cssFilters = useMemo(() => getCssFilters(podSettings), [podSettings]);
-
-  // stable preview aspect (never changes with presets)
+  // stable preview aspect
   const designAspect = useMemo(() => {
     const w = activeItem?.meta?.width || 1;
     const h = activeItem?.meta?.height || 1;
     return w / h;
   }, [activeItem]);
 
-  /* ===================== PASTE FROM CLIPBOARD ===================== */
-  const pasteFromClipboard = useCallback(async () => {
-    try {
-      if (!navigator.clipboard?.read) {
-        showToast("Paste not supported on this browser — use Upload.", "error");
-        return null;
-      }
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const type = item.types?.find((t) => t.startsWith("image/"));
-        if (type) {
-          const blob = await item.getType(type);
-          const file = new File([blob], `pasted-${Date.now()}.png`, { type });
-          return file;
-        }
-      }
-      showToast("Clipboard has no image — copy an image first.", "error");
-      return null;
-    } catch {
-      showToast("Paste blocked by browser — use Upload.", "error");
-      return null;
-    }
-  }, [showToast]);
+  // preview filter = CMYK simulation (applied live via canvas would be heavy),
+  // so we do a light CSS feel: keep none. Real simulation happens in exportFinal.
+  // For preview realism without re-render cost, we keep it simple:
+  const previewHintStyle = useMemo(() => {
+    // tiny desat/contrast feel; optional and fast
+    if (!simulation.enabled) return {};
+    return { filter: "saturate(0.98) contrast(0.98) brightness(0.98)" };
+  }, [simulation.enabled]);
 
+  /* ===================== FILE INPUT + MULTI UPLOAD ===================== */
   const fileInputRef = useRef(null);
-  const handleUploadButton = useCallback(() => fileInputRef.current?.click(), []);
-  const handlePasteButton = useCallback(async () => {
-    const file = await pasteFromClipboard();
-    if (file) handleFileSelect(file);
-  }, [pasteFromClipboard]);
+  const openFilePicker = useCallback(() => fileInputRef.current?.click(), []);
 
-  /* ===================== ADD ITEM (CUTOUT ONCE) ===================== */
-  const handleFileSelect = useCallback(
+  const processOneFile = useCallback(
     async (file) => {
-      if (!file?.type?.startsWith("image/")) return;
+      if (!file?.type?.startsWith("image/")) return null;
 
       if (!isPro && usageCount >= FREE_LIMIT) {
         setShowProModal(true);
-        return;
+        return null;
       }
+
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const originalUrl = URL.createObjectURL(file);
+
+      const result = await FastImageProcessor.createCutoutFromFile(file);
+
+      const meta = {
+        width: result.width,
+        height: result.height,
+        detectedBackground: result.detectedBackground,
+        hasColors: result.hasColors,
+        classification: result.classification,
+        ms: result.ms,
+      };
+
+      const newItem = {
+        id,
+        file,
+        name: file.name || `design-${id}.png`,
+        originalUrl,
+        cutoutUrl: result.cutoutUrl,
+        meta,
+      };
+
+      // auto defaults: set shirt color based on detected bg (practical)
+      const defaultColor = meta.detectedBackground === "black" ? "black" : "white";
+      const localIsDarkShirt = defaultColor !== "white";
+
+      // auto simulate: fast center sample
+      if (autoSimulateOn) {
+        try {
+          const tmp = document.createElement("canvas");
+          tmp.width = meta.width;
+          tmp.height = meta.height;
+          const ctx = tmp.getContext("2d", { willReadFrequently: true });
+          const img = new Image();
+          img.src = result.cutoutUrl;
+          await new Promise((r) => (img.onload = r));
+          ctx.drawImage(img, 0, 0);
+
+          const sw = Math.min(520, tmp.width);
+          const sh = Math.min(520, tmp.height);
+          const x = Math.floor((tmp.width - sw) / 2);
+          const y = Math.floor((tmp.height - sh) / 2);
+          const data = ctx.getImageData(x, y, sw, sh);
+          const metrics = analyzeForAuto(data);
+
+          const auto = autoSimulateFromMetrics(metrics, localIsDarkShirt, !!meta.classification?.isLineArt);
+          setSimulation(auto);
+        } catch {}
+      }
+
+      setSelectedColor(defaultColor);
+      setViewMode("compare");
+
+      const newCount = usageCount + 1;
+      setUsageCount(newCount);
+      saveUsage(newCount);
+
+      return newItem;
+    },
+    [autoSimulateOn, isPro, usageCount]
+  );
+
+  const addFiles = useCallback(
+    async (files) => {
+      const list = Array.from(files || []).filter((f) => f?.type?.startsWith("image/"));
+      if (!list.length) return;
 
       setCutting(true);
-      setExportStage("");
+      setExportStage(`Processing ${list.length}…`);
       try {
-        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const originalUrl = URL.createObjectURL(file);
-
-        const result = await FastImageProcessor.createCutoutBlobUrl(file);
-
-        const meta = {
-          width: result.width,
-          height: result.height,
-          detectedBackground: result.detectedBackground,
-          hasColors: result.hasColors,
-          classification: result.classification,
-          ms: result.ms,
-        };
-
-        const newItem = {
-          id,
-          file,
-          name: file.name || `design-${id}.png`,
-          originalUrl,
-          cutoutUrl: result.cutoutUrl,
-          meta,
-        };
-
-        setItems((prev) => [newItem, ...prev].slice(0, 30));
-        setActiveId(id);
-
-        // smart default color based on detected background
-        setSelectedColor(meta.detectedBackground === "black" ? "black" : "white");
-
-        // default view
-        setViewMode("compare");
-
-        // auto simulate once (fast sample)
-        if (autoSimulateOn) {
-          try {
-            const tmp = document.createElement("canvas");
-            tmp.width = meta.width;
-            tmp.height = meta.height;
-            const ctx = tmp.getContext("2d", { willReadFrequently: true });
-            const img = new Image();
-            img.src = result.cutoutUrl;
-            await new Promise((r) => (img.onload = r));
-            ctx.drawImage(img, 0, 0);
-
-            // sample center chunk (fast)
-            const sw = Math.min(500, tmp.width);
-            const sh = Math.min(500, tmp.height);
-            const x = Math.floor((tmp.width - sw) / 2);
-            const y = Math.floor((tmp.height - sh) / 2);
-            const data = ctx.getImageData(x, y, sw, sh);
-            const metrics = analyzeForPrint(data);
-            const auto = autoSimulateSettings(metrics, isDarkShirt, !!meta.classification?.isLineArt);
-            setPodSettings(auto);
-          } catch {}
+        const added = [];
+        for (let i = 0; i < list.length; i++) {
+          setExportStage(`Processing ${i + 1}/${list.length}…`);
+          await tick();
+          const it = await processOneFile(list[i]);
+          if (it) added.push(it);
         }
 
-        const newCount = usageCount + 1;
-        setUsageCount(newCount);
-        saveUsage(newCount);
+        if (added.length) {
+          setItems((prev) => {
+            const next = [...added.reverse(), ...prev].slice(0, 40);
+            return next;
+          });
 
-        showToast("Image processed.", "ok");
-      } catch (err) {
-        console.error(err);
-        showToast("Failed to process image. Try another file.", "error");
+          const first = added[added.length - 1];
+          setActiveId(first?.id || null);
+
+          // auto select added items for batch
+          setSelectedIds((prev) => {
+            const next = new Set(prev);
+            added.forEach((x) => next.add(x.id));
+            return next;
+          });
+
+          showToast(`Added ${added.length} image(s).`, "ok");
+        }
+      } catch (e) {
+        console.error(e);
+        showToast("Failed to process one of the images.", "error");
       } finally {
         setCutting(false);
+        setExportStage("");
       }
     },
-    [isPro, usageCount, autoSimulateOn, isDarkShirt, showToast]
+    [processOneFile, showToast]
   );
 
-  /* ===================== DRAG & DROP ===================== */
-  const onDragOver = useCallback((e) => {
-    e.preventDefault();
-    if (e.dataTransfer?.types?.includes("Files")) setDragActive(true);
+  /* ===================== PASTE FROM CLIPBOARD ===================== */
+  const pasteFromClipboard = useCallback(async () => {
+    // Desktop: try Clipboard API
+    try {
+      if (!navigator.clipboard?.read) return null;
+      const clipItems = await navigator.clipboard.read();
+      for (const item of clipItems) {
+        const type = item.types?.find((t) => t.startsWith("image/"));
+        if (type) {
+          const blob = await item.getType(type);
+          return new File([blob], `pasted-${Date.now()}.png`, { type });
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }, []);
 
-  const onDragLeave = useCallback((e) => {
-    if (e.currentTarget === e.target) setDragActive(false);
-  }, []);
-
-  const onDropAny = useCallback(
-    (e) => {
-      e.preventDefault();
-      setDragActive(false);
-      const file = e.dataTransfer?.files?.[0];
-      if (file) handleFileSelect(file);
-    },
-    [handleFileSelect]
-  );
+  const handlePasteButton = useCallback(async () => {
+    const file = await pasteFromClipboard();
+    if (file) {
+      addFiles([file]);
+      return;
+    }
+    // Mobile/tablet fallback: open file picker (always works)
+    showToast("Paste not supported here — opening Upload.", "error");
+    openFilePicker();
+  }, [pasteFromClipboard, addFiles, showToast, openFilePicker]);
 
   /* ===================== GLOBAL PASTE (DESKTOP) ===================== */
   useEffect(() => {
@@ -1536,7 +1518,7 @@ export default function App() {
             const file = it.getAsFile();
             if (file) {
               e.preventDefault();
-              handleFileSelect(file);
+              addFiles([file]);
               return;
             }
           }
@@ -1545,7 +1527,7 @@ export default function App() {
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [handleFileSelect]);
+  }, [addFiles]);
 
   /* ===================== SHORTCUTS TOGGLE ===================== */
   useEffect(() => {
@@ -1561,93 +1543,41 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isDesktop, mobileSettingsOpen]);
 
-  /* ===================== DOWNLOAD (EXPORT ONLY) ===================== */
-  const downloadActive = useCallback(async () => {
-    if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
-    setExporting(true);
-    setExportStage("Preparing…");
-    try {
-      const res = await FastImageProcessor.exportFinal({
-        cutoutUrl: (activeItem?.cutoutUrl || ""),
-        cutoutW: activeItem.meta.width,
-        cutoutH: activeItem.meta.height,
-        targetW: targetDimensions.width,
-        targetH: targetDimensions.height,
-        podSettings,
-        classification: activeItem.meta.classification,
-        quality: enhanceQuality,
-        stageCb: (s) => setExportStage(s),
-        inkBoost: true,
-      });
+  /* ===================== DRAG & DROP ===================== */
+  const onDragOver = useCallback((e) => {
+    e.preventDefault();
+    if (e.dataTransfer?.types?.includes("Files")) setDragActive(true);
+  }, []);
 
-      downloadBlob(res.blob, `printready-${Date.now()}.png`);
-      showToast("PNG downloaded.", "ok");
-    } catch (e) {
-      console.error(e);
-      showToast("Export failed. Try again.", "error");
-    } finally {
-      setExporting(false);
-      setExportStage("");
-    }
-  }, [activeItem, targetDimensions.width, targetDimensions.height, podSettings, enhanceQuality, showToast]);
+  const onDragLeave = useCallback((e) => {
+    if (e.currentTarget === e.target) setDragActive(false);
+  }, []);
 
-  /* ===================== BATCH ZIP (MVP) ===================== */
-  const downloadAllZip = useCallback(async () => {
-    if (!items.length) return;
-    setExporting(true);
-    setExportStage("Preparing ZIP…");
-    try {
-        const JSZip = window.JSZip;
-        if (!JSZip) throw new Error("JSZip not loaded. Check index.html CDN script.");
-        const zip = new JSZip();
+  const onDropAny = useCallback(
+    (e) => {
+      e.preventDefault();
+      setDragActive(false);
+      const files = e.dataTransfer?.files;
+      if (files?.length) addFiles(files);
+    },
+    [addFiles]
+  );
 
-
-      for (let idx = 0; idx < items.length; idx++) {
-        const it = items[idx];
-        setExportStage(`Exporting ${idx + 1}/${items.length}…`);
-        await tick();
-
-        const res = await FastImageProcessor.exportFinal({
-          cutoutUrl: it.cutoutUrl,
-          cutoutW: it.meta.width,
-          cutoutH: it.meta.height,
-          targetW: targetDimensions.width,
-          targetH: targetDimensions.height,
-          podSettings,
-          classification: it.meta.classification,
-          quality: enhanceQuality,
-          stageCb: () => {},
-          inkBoost: true,
-        });
-
-        const arrBuf = await res.blob.arrayBuffer();
-        const safeName = (it.name || `design-${it.id}.png`).replace(/[^\w.\-]+/g, "_");
-        zip.file(safeName, arrBuf);
-      }
-
-      setExportStage("Creating ZIP…");
-      const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
-      downloadBlob(zipBlob, `printready-batch-${Date.now()}.zip`);
-      showToast("ZIP downloaded.", "ok");
-    } catch (e) {
-      console.error(e);
-      showToast("Batch export failed.", "error");
-    } finally {
-      setExporting(false);
-      setExportStage("");
-    }
-  }, [items, targetDimensions.width, targetDimensions.height, podSettings, enhanceQuality, showToast]);
-
-  /* ===================== RESET / REMOVE ===================== */
+  /* ===================== REMOVE / RESET ===================== */
   const resetAll = useCallback(() => {
     setItems((prev) => {
       prev.forEach((it) => {
-        try { URL.revokeObjectURL(it.originalUrl); } catch {}
-        try { URL.revokeObjectURL(it.cutoutUrl); } catch {}
+        try {
+          URL.revokeObjectURL(it.originalUrl);
+        } catch {}
+        try {
+          URL.revokeObjectURL(it.cutoutUrl);
+        } catch {}
       });
       return [];
     });
     setActiveId(null);
+    setSelectedIds(new Set());
     setViewMode("compare");
     setSelectedPreset("original");
     setTargetDimensions({ width: 0, height: 0 });
@@ -1655,27 +1585,36 @@ export default function App() {
     setCustomHeight("");
     setShowCustomInput(false);
     setExportStage("");
-    setPodSettings({ saturationReduction: 1, darknessIncrease: 1, contrastReduction: 1 });
-    setAutoSimulateOn(true);
-    setDragActive(false);
   }, []);
 
-  const removeItem = useCallback((id) => {
-    setItems((prev) => {
-      const next = prev.filter((x) => x.id !== id);
-      const removed = prev.find((x) => x.id === id);
-      if (removed) {
-        try { URL.revokeObjectURL(removed.originalUrl); } catch {}
-        try { URL.revokeObjectURL(removed.cutoutUrl); } catch {}
-      }
-      // if removed active, pick next
-      if (id === activeId) {
-        const nextActive = next[0]?.id || null;
-        setActiveId(nextActive);
-      }
-      return next;
-    });
-  }, [activeId]);
+  const removeItem = useCallback(
+    (id) => {
+      setItems((prev) => {
+        const removed = prev.find((x) => x.id === id);
+        const next = prev.filter((x) => x.id !== id);
+        if (removed) {
+          try {
+            URL.revokeObjectURL(removed.originalUrl);
+          } catch {}
+          try {
+            URL.revokeObjectURL(removed.cutoutUrl);
+          } catch {}
+        }
+
+        // active fallback
+        if (id === activeId) setActiveId(next[0]?.id || null);
+
+        return next;
+      });
+
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    },
+    [activeId]
+  );
 
   /* ===================== PRESET LIST ===================== */
   const presets = useMemo(
@@ -1689,6 +1628,128 @@ export default function App() {
     ],
     []
   );
+
+  /* ===================== DOWNLOAD PNG (ACTIVE ONLY) ===================== */
+  const downloadActivePng = useCallback(async () => {
+    if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
+    setExporting(true);
+    setExportStage("Preparing…");
+    try {
+      const res = await FastImageProcessor.exportFinal({
+        cutoutUrl: activeItem.cutoutUrl,
+        cutoutW: activeItem.meta.width,
+        cutoutH: activeItem.meta.height,
+        targetW: targetDimensions.width,
+        targetH: targetDimensions.height,
+        simulationSettings: simulation,
+        classification: activeItem.meta.classification,
+        quality: enhanceQuality,
+        stageCb: (s) => setExportStage(s),
+      });
+
+      downloadBlob(res.blob, `printready-${Date.now()}.png`);
+      showToast("PNG downloaded.", "ok");
+    } catch (e) {
+      console.error(e);
+      showToast("Export failed. Try again.", "error");
+    } finally {
+      setExporting(false);
+      setExportStage("");
+    }
+  }, [activeItem, targetDimensions.width, targetDimensions.height, simulation, enhanceQuality, showToast]);
+
+  /* ===================== ZIP (SELECTED ONLY) ===================== */
+  const getZipLib = useCallback(async () => {
+    // 1) Try installed package
+    try {
+      const mod = await import("jszip");
+      return mod.default || mod;
+    } catch {}
+    // 2) Try CDN
+    if (window.JSZip) return window.JSZip;
+    return null;
+  }, []);
+
+  const downloadSelectedZip = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    const selectedItems = items.filter((it) => ids.includes(it.id));
+    if (!selectedItems.length) {
+      showToast("Select at least 1 image for ZIP.", "error");
+      return;
+    }
+
+    setExporting(true);
+    setExportStage("Preparing ZIP…");
+
+    try {
+      const JSZip = await getZipLib();
+      if (!JSZip) {
+        throw new Error("ZIP library missing. Install 'jszip' or add JSZip CDN.");
+      }
+      const zip = new JSZip();
+
+      for (let idx = 0; idx < selectedItems.length; idx++) {
+        const it = selectedItems[idx];
+        setExportStage(`Exporting ${idx + 1}/${selectedItems.length}…`);
+        await tick();
+
+        const res = await FastImageProcessor.exportFinal({
+          cutoutUrl: it.cutoutUrl,
+          cutoutW: it.meta.width,
+          cutoutH: it.meta.height,
+          targetW: targetDimensions.width,
+          targetH: targetDimensions.height,
+          simulationSettings: simulation,
+          classification: it.meta.classification,
+          quality: enhanceQuality,
+          stageCb: () => {},
+        });
+
+        const arrBuf = await res.blob.arrayBuffer();
+        const safeName = (it.name || `design-${it.id}.png`).replace(/[^\w.\-]+/g, "_");
+        zip.file(safeName, arrBuf);
+      }
+
+      setExportStage("Creating ZIP…");
+      const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(zipBlob, `printready-batch-${Date.now()}.zip`);
+      showToast(`ZIP downloaded (${selectedItems.length}).`, "ok");
+    } catch (e) {
+      console.error(e);
+      showToast(e?.message || "Batch export failed.", "error");
+    } finally {
+      setExporting(false);
+      setExportStage("");
+    }
+  }, [selectedIds, items, targetDimensions.width, targetDimensions.height, simulation, enhanceQuality, showToast, getZipLib]);
+
+  /* ===================== AUTO SIMULATE NOW (for current active) ===================== */
+  const runAutoSimulateNow = useCallback(async () => {
+    if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
+    try {
+      const tmp = document.createElement("canvas");
+      tmp.width = activeItem.meta.width;
+      tmp.height = activeItem.meta.height;
+      const ctx = tmp.getContext("2d", { willReadFrequently: true });
+      const img = new Image();
+      img.src = activeItem.cutoutUrl;
+      await new Promise((r) => (img.onload = r));
+      ctx.drawImage(img, 0, 0);
+
+      const sw = Math.min(520, tmp.width);
+      const sh = Math.min(520, tmp.height);
+      const x = Math.floor((tmp.width - sw) / 2);
+      const y = Math.floor((tmp.height - sh) / 2);
+      const data = ctx.getImageData(x, y, sw, sh);
+      const metrics = analyzeForAuto(data);
+
+      const auto = autoSimulateFromMetrics(metrics, isDarkShirt, !!activeItem.meta.classification?.isLineArt);
+      setSimulation(auto);
+      showToast("Auto simulation applied.", "ok");
+    } catch {
+      showToast("Auto simulation failed on this image.", "error");
+    }
+  }, [activeItem, isDarkShirt, showToast]);
 
   /* ===================== SIDEBAR CONTENT ===================== */
   const SidebarContent = useCallback(
@@ -1708,9 +1769,13 @@ export default function App() {
               const needsPro = preset.pro && !isPro;
               return (
                 <button
+                  type="button"
                   key={preset.id}
                   onClick={() => {
-                    if (needsPro) { setShowProModal(true); return; }
+                    if (needsPro) {
+                      setShowProModal(true);
+                      return;
+                    }
                     setSelectedPreset(preset.id);
                     setTargetDimensions({ width: preset.width, height: preset.height });
                     setShowCustomInput(false);
@@ -1733,6 +1798,7 @@ export default function App() {
           </div>
 
           <button
+            type="button"
             onClick={() => {
               setShowCustomInput(!showCustomInput);
               if (!showCustomInput) setSelectedPreset("custom");
@@ -1743,7 +1809,9 @@ export default function App() {
             ].join(" ")}
           >
             <div className="font-semibold text-xs">Custom Size</div>
-            <div className="text-[9px] opacity-70">Up to {MAX_DIMENSION}×{MAX_DIMENSION}px</div>
+            <div className="text-[9px] opacity-70">
+              Up to {MAX_DIMENSION}×{MAX_DIMENSION}px
+            </div>
           </button>
 
           {showCustomInput && (
@@ -1777,6 +1845,7 @@ export default function App() {
               </div>
 
               <button
+                type="button"
                 onClick={() => {
                   const w = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customWidth, 10) || 0));
                   const h = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customHeight, 10) || 0));
@@ -1801,6 +1870,7 @@ export default function App() {
               <div className="grid grid-cols-6 gap-2">
                 {shirtColors.dark.map((c) => (
                   <button
+                    type="button"
                     key={c.name}
                     onClick={() => setSelectedColor(c.name)}
                     title={c.label}
@@ -1821,6 +1891,7 @@ export default function App() {
               <div className="grid grid-cols-6 gap-2">
                 {shirtColors.light.map((c) => (
                   <button
+                    type="button"
                     key={c.name}
                     onClick={() => setSelectedColor(c.name)}
                     title={c.label}
@@ -1836,13 +1907,14 @@ export default function App() {
           </section>
         )}
 
-        {/* Print Simulation */}
+        {/* Print Simulation (CMYK) */}
         <section className="glass-panel rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-              <Sliders size={14} className="text-violet-400" /> Print Simulation
+              <Sliders size={14} className="text-violet-400" /> Print Simulation (CMYK)
             </h3>
             <button
+              type="button"
               onClick={() => setAutoSimulateOn((v) => !v)}
               className={`text-[10px] px-2 py-1 rounded-full border ${
                 autoSimulateOn ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" : "border-white/10 bg-white/5 text-slate-300"
@@ -1854,25 +1926,47 @@ export default function App() {
           </div>
 
           <div className="space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setSimulation((s) => ({ ...s, enabled: !s.enabled }))}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold border ${
+                  simulation.enabled ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-300"
+                }`}
+              >
+                {simulation.enabled ? "Simulation ON" : "Simulation OFF"}
+              </button>
+
+              <button
+                type="button"
+                onClick={runAutoSimulateNow}
+                disabled={!hasImage}
+                className="py-2 px-3 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-200 disabled:opacity-40"
+                title="Analyze this image and set realistic defaults"
+              >
+                Auto Now
+              </button>
+            </div>
+
             {[
-              { label: "Saturation", key: "saturationReduction", min: 0.5, max: 1 },
-              { label: "Brightness", key: "darknessIncrease", min: 0.6, max: 1 },
-              { label: "Contrast", key: "contrastReduction", min: 0.7, max: 1 },
+              { label: "Ink Limit", key: "inkLimit", min: 1.6, max: 3.0, step: 0.02, hint: "Lower = less saturated / more realistic" },
+              { label: "Dot Gain", key: "gain", min: 0, max: 0.18, step: 0.01, hint: "Darkens mids like fabric ink" },
+              { label: "Vibrance", key: "vibrance", min: 0.75, max: 1.0, step: 0.01, hint: "Keeps some color while realistic" },
             ].map((s) => (
               <div key={s.key} className={`${!hasImage ? "opacity-40 pointer-events-none" : ""}`}>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs text-slate-300 font-medium">{s.label}</span>
                   <span className="text-xs font-mono text-violet-300 bg-slate-900/40 px-2 py-0.5 rounded tabular-nums">
-                    {Math.round(podSettings[s.key] * 100)}
+                    {typeof simulation[s.key] === "number" ? simulation[s.key].toFixed(2) : ""}
                   </span>
                 </div>
                 <input
                   type="range"
                   min={s.min}
                   max={s.max}
-                  step={0.01}
-                  value={podSettings[s.key]}
-                  onChange={(e) => setPodSettings((p) => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
+                  step={s.step}
+                  value={simulation[s.key]}
+                  onChange={(e) => setSimulation((p) => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
                   disabled={!hasImage}
                   className="w-full h-2 bg-slate-900/60 rounded-full appearance-none cursor-pointer
                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5
@@ -1882,31 +1976,16 @@ export default function App() {
                     [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
                   style={{ touchAction: "none" }}
                 />
+                <div className="text-[10px] text-slate-500 mt-1">{s.hint}</div>
               </div>
             ))}
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setPodSettings({ saturationReduction: 0.82, darknessIncrease: 0.89, contrastReduction: 0.91 })}
-                disabled={!hasImage}
-                className="py-2 bg-violet-600/20 hover:bg-violet-600/30 text-violet-300 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-1.5 disabled:opacity-40"
-              >
-                <Shirt size={12} /> Simulate
-              </button>
-              <button
-                onClick={() => setPodSettings({ saturationReduction: 1, darknessIncrease: 1, contrastReduction: 1 })}
-                disabled={!hasImage}
-                className="py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-medium text-slate-300 flex items-center justify-center gap-1.5 disabled:opacity-40"
-              >
-                <RotateCcw size={12} /> Reset
-              </button>
-            </div>
 
             <div className="flex items-center justify-between pt-1">
               <div className="text-[10px] text-slate-500">Enhance quality</div>
               <div className="flex gap-2">
                 {["auto", "hq"].map((m) => (
                   <button
+                    type="button"
                     key={m}
                     onClick={() => setEnhanceQuality(m)}
                     className={`text-[10px] px-2 py-1 rounded-full border ${
@@ -1921,48 +2000,93 @@ export default function App() {
           </div>
         </section>
 
-        {/* Batch (MVP) */}
+        {/* Batch */}
         <section className="glass-panel rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-              <Layers size={14} className="text-violet-400" /> Batch
+              <Layers size={14} className="text-violet-400" /> Batch Export
             </h3>
-            <span className="text-[10px] text-slate-500">{items.length} items</span>
+            <span className="text-[10px] text-slate-500">
+              {selectedCount}/{items.length} selected
+            </span>
           </div>
 
           <div className="flex gap-2">
             <button
-              onClick={handleUploadButton}
+              type="button"
+              onClick={openFilePicker}
               className="flex-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold flex items-center justify-center gap-2"
             >
               <ListPlus size={14} /> Add
             </button>
+
             <button
-              onClick={downloadAllZip}
-              disabled={!items.length || processing}
+              type="button"
+              onClick={() =>
+                setSelectedIds((prev) => {
+                  if (prev.size === items.length) return new Set();
+                  return new Set(items.map((x) => x.id));
+                })
+              }
+              disabled={!items.length}
+              className="py-2 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold disabled:opacity-40"
+              title="Select all / clear"
+            >
+              {selectedCount === items.length && items.length ? "Clear" : "All"}
+            </button>
+
+            <button
+              type="button"
+              onClick={downloadSelectedZip}
+              disabled={!selectedCount || processing}
               className="flex-1 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-2"
             >
-              <Download size={14} /> ZIP
+              <Package size={14} /> ZIP
             </button>
           </div>
 
-          {items.length > 1 && (
+          {!!items.length && (
             <div className="mt-3 flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              {items.slice(0, 12).map((it) => (
-                <button
-                  key={it.id}
-                  onClick={() => setActiveId(it.id)}
-                  className={`relative shrink-0 w-12 h-12 rounded-xl border overflow-hidden ${
-                    it.id === activeId ? "border-violet-500" : "border-white/10"
-                  }`}
-                  title={it.name}
-                >
-                  <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" />
-                  <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-black/40" />
-                </button>
-              ))}
+              {items.slice(0, 20).map((it) => {
+                const selected = selectedIds.has(it.id);
+                const active = it.id === activeId;
+                return (
+                  <div key={it.id} className="relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveId(it.id)}
+                      className={`relative w-12 h-12 rounded-xl border overflow-hidden ${
+                        active ? "border-violet-500" : "border-white/10"
+                      }`}
+                      title={it.name}
+                    >
+                      <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(it.id)) next.delete(it.id);
+                          else next.add(it.id);
+                          return next;
+                        })
+                      }
+                      className="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-black/70 border border-white/10 flex items-center justify-center shadow-lg"
+                      title={selected ? "Unselect" : "Select"}
+                    >
+                      {selected ? <CheckSquare size={15} className="text-emerald-400" /> : <Square size={15} className="text-slate-300" />}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
+
+          <div className="mt-2 text-[10px] text-slate-500">
+            Tip: click image = active view • checkbox = add/remove from ZIP
+          </div>
         </section>
       </div>
     ),
@@ -1972,19 +2096,24 @@ export default function App() {
       customHeight,
       customWidth,
       enhanceQuality,
-      handleUploadButton,
       hasImage,
       isPro,
       items,
-      podSettings,
+      openFilePicker,
       presets,
       processing,
       selectedColor,
+      selectedCount,
+      selectedIds,
       selectedPreset,
+      showCustomInput,
+      downloadSelectedZip,
+      runAutoSimulateNow,
+      simulation,
       shirtColors.dark,
       shirtColors.light,
-      showCustomInput,
-      downloadAllZip,
+      previewHintStyle,
+      activeId,
     ]
   );
 
@@ -2006,13 +2135,15 @@ export default function App() {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            onClick={handleUploadButton}
+            type="button"
+            onClick={openFilePicker}
             className="w-full py-3.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-bold flex items-center justify-center gap-2"
           >
-            <Upload size={18} /> Upload
+            <Upload size={18} /> Upload (multi)
           </button>
 
           <button
+            type="button"
             onClick={handlePasteButton}
             className="w-full py-3.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold flex items-center justify-center gap-2"
           >
@@ -2020,17 +2151,17 @@ export default function App() {
           </button>
         </div>
 
-        <div className="mt-5 text-[12px] text-slate-500">Desktop: Ctrl/⌘+V works globally. Mobile: Paste works only if supported.</div>
+        <div className="mt-5 text-[12px] text-slate-500">Desktop: Ctrl/⌘+V works. Mobile: Paste may not work — Upload always works.</div>
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-500">
           <span className="flex items-center gap-2">
             <Zap size={14} className="text-emerald-500" /> One-time cutout
           </span>
           <span className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" /> Stable preview
+            <Zap size={14} className="text-emerald-500" /> CMYK print simulation
           </span>
           <span className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" /> Export enhancement on download
+            <Zap size={14} className="text-emerald-500" /> HQ export option
           </span>
         </div>
       </div>
@@ -2044,6 +2175,7 @@ export default function App() {
         <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={() => removeItem(activeId)}
             className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
             title="Remove"
@@ -2051,6 +2183,7 @@ export default function App() {
             <Trash2 size={16} />
           </button>
           <button
+            type="button"
             onClick={resetAll}
             className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
             title="Reset all"
@@ -2064,7 +2197,7 @@ export default function App() {
         <PreviewFrame aspect={designAspect}>
           <div className="w-full h-full transparency-grid rounded-2xl overflow-hidden">
             <ZoomableImage
-              src={(activeItem?.originalUrl || "")}
+              src={activeItem?.originalUrl || ""}
               alt="Original"
               className="w-full h-full object-contain drop-shadow-2xl"
               containerClassName="w-full h-full flex items-center justify-center"
@@ -2082,10 +2215,18 @@ export default function App() {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2">
-        <button onClick={handleUploadButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={openFilePicker}
+          className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
+        >
           <Upload size={16} /> Upload
         </button>
-        <button onClick={handlePasteButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={handlePasteButton}
+          className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
+        >
           <Upload size={16} /> Paste
         </button>
       </div>
@@ -2110,29 +2251,28 @@ export default function App() {
                   {activeItem.meta.classification.isLineArt ? "line-art auto" : "photo auto"}
                 </span>
               )}
-              {isMockup && (
-                <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>
-              )}
+              {isMockup && <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>}
             </div>
           </div>
         )}
 
-        <div
-          className={`flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10 ${bgClass}`}
-          style={{ backgroundColor: bgColor }}
-        >
-          {/* Keep preview ALWAYS rendered (no reflow). Overlay on top when exporting */}
+        <div className={`flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10 ${bgClass}`} style={{ backgroundColor: bgColor }}>
           <PreviewFrame aspect={designAspect}>
             <div className="w-full h-full flex items-center justify-center">
               {isCompare ? (
-                <CompareView beforeSrc={(activeItem?.originalUrl || "")} afterSrc={(activeItem?.cutoutUrl || "")} afterStyle={cssFilters} defaultZoom={isDesktop ? 1.18 : 1.08} />
+                <CompareView
+                  beforeSrc={activeItem?.originalUrl || ""}
+                  afterSrc={activeItem?.cutoutUrl || ""}
+                  afterStyle={previewHintStyle}
+                  defaultZoom={isDesktop ? 1.18 : 1.08}
+                />
               ) : (
                 <ZoomableImage
-                  src={(activeItem?.cutoutUrl || "")}
-                  alt="Cutout"
+                  src={activeItem?.cutoutUrl || ""}
+                  alt="Transparent"
                   className="w-full h-full object-contain drop-shadow-2xl"
                   containerClassName="w-full h-full flex items-center justify-center"
-                  style={cssFilters}
+                  style={previewHintStyle}
                   defaultZoom={1.12}
                   hint={!isDesktop}
                 />
@@ -2140,7 +2280,6 @@ export default function App() {
             </div>
           </PreviewFrame>
 
-          {/* Mockup collar hint */}
           {isMockup && (
             <div
               className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px] pointer-events-none"
@@ -2148,7 +2287,6 @@ export default function App() {
             />
           )}
 
-          {/* Stage overlay (premium, no layout shift) */}
           {(cutting || exporting) && (
             <div className="absolute inset-0 z-40 bg-black/45 backdrop-blur-sm flex items-center justify-center">
               <div className="glass-panel rounded-3xl px-6 py-5 border border-white/10 shadow-2xl text-center max-w-[88%]">
@@ -2159,7 +2297,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Export size badge */}
           {activeItem?.meta && (
             <div className="absolute bottom-3 left-3 bg-black/55 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-200 z-20 flex items-center gap-1">
               <Maximize2 size={10} className="opacity-80" />
@@ -2167,10 +2304,10 @@ export default function App() {
             </div>
           )}
 
-          {isMockup && (
+          {simulation.enabled && (
             <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
               <Sparkles size={10} className="text-amber-400" />
-              POD Preview
+              CMYK Preview
             </div>
           )}
         </div>
@@ -2181,6 +2318,7 @@ export default function App() {
             { mode: "mockup", icon: Shirt, label: "Mockup" },
           ].map(({ mode, icon: Icon, label }) => (
             <button
+              type="button"
               key={mode}
               onClick={() => setViewMode(mode)}
               className={[
@@ -2193,13 +2331,13 @@ export default function App() {
           ))}
         </div>
 
-        {/* Quick colors on mobile (only meaningful for mockup, but we keep available) */}
         {!isDesktop && (
           <div className="mt-3 glass-panel rounded-xl p-3">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Quick Colors</div>
             <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
               {[...shirtColors.dark, ...shirtColors.light].map((c) => (
                 <button
+                  type="button"
                   key={c.name}
                   onClick={() => setSelectedColor(c.name)}
                   className={[
@@ -2243,14 +2381,9 @@ export default function App() {
           </span>
         )}
 
-        {activeItem?.meta?.classification && (
-          <span className="hidden sm:inline-flex text-xs px-2 py-1 rounded-full font-medium bg-violet-500/10 text-violet-300">
-            {activeItem.meta.classification.isLineArt ? "line-art" : "photo"}
-          </span>
-        )}
-
         {isDesktop && hasImage && (
           <button
+            type="button"
             onClick={() => setSidebarOpen((s) => !s)}
             className="hidden lg:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
             title={sidebarOpen ? "Hide panel" : "Show panel"}
@@ -2261,6 +2394,7 @@ export default function App() {
         )}
 
         <button
+          type="button"
           onClick={() => setShowShortcuts(true)}
           className="hidden sm:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
           title="Shortcuts ( ? )"
@@ -2272,6 +2406,7 @@ export default function App() {
         {!isPro && <span className="hidden sm:inline text-xs text-slate-500">{Math.max(0, FREE_LIMIT - usageCount)} free left</span>}
 
         <button
+          type="button"
           onClick={() => (isPro ? setIsPro(false) : setShowProModal(true))}
           className={[
             "px-3 sm:px-4 py-1.5 rounded-full text-xs font-bold transition-all",
@@ -2313,10 +2448,10 @@ export default function App() {
             </ul>
           </div>
 
-          <button onClick={() => { setIsPro(true); setShowProModal(false); }} className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3">
+          <button type="button" onClick={() => { setIsPro(true); setShowProModal(false); }} className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3">
             Go Pro — $9/month
           </button>
-          <button onClick={() => setShowProModal(false)} className="w-full py-3 text-slate-500 hover:text-slate-300 text-sm">
+          <button type="button" onClick={() => setShowProModal(false)} className="w-full py-3 text-slate-500 hover:text-slate-300 text-sm">
             Maybe later
           </button>
         </div>
@@ -2342,6 +2477,7 @@ export default function App() {
         <div className="p-3 border-b border-white/5 flex items-center justify-between">
           <div className={`text-xs font-bold text-white/80 ${sidebarOpen ? "" : "hidden"}`}>Controls</div>
           <button
+            type="button"
             onClick={() => setSidebarOpen((s) => !s)}
             className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
             title={sidebarOpen ? "Collapse" : "Expand"}
@@ -2355,12 +2491,13 @@ export default function App() {
             <SidebarContent />
           ) : (
             <div className="flex flex-col items-center gap-2 pt-2">
-              <button onClick={() => setSidebarOpen(true)} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Open panel">
+              <button type="button" onClick={() => setSidebarOpen(true)} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Open panel">
                 <Sliders size={18} className="text-violet-300" />
               </button>
 
               <button
-                onClick={downloadActive}
+                type="button"
+                onClick={downloadActivePng}
                 disabled={!activeItem || processing}
                 className="w-12 h-12 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 flex items-center justify-center"
                 title="Download PNG"
@@ -2368,11 +2505,11 @@ export default function App() {
                 <Download size={18} className="text-white" />
               </button>
 
-              <button onClick={handlePasteButton} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Paste">
+              <button type="button" onClick={handlePasteButton} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Paste">
                 <Upload size={18} className="text-violet-300" />
               </button>
 
-              <button onClick={handleUploadButton} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Upload">
+              <button type="button" onClick={openFilePicker} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Upload">
                 <Upload size={18} className="text-violet-300" />
               </button>
             </div>
@@ -2382,7 +2519,8 @@ export default function App() {
         {sidebarOpen && (
           <div className="p-5 bg-[#08080a] border-t border-white/5">
             <button
-              onClick={downloadActive}
+              type="button"
+              onClick={downloadActivePng}
               disabled={!activeItem || processing}
               className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
             >
@@ -2402,10 +2540,10 @@ export default function App() {
         <div className="flex items-center justify-between">
           <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Original</div>
           <div className="flex items-center gap-2">
-            <button onClick={() => removeItem(activeId)} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Remove">
+            <button type="button" onClick={() => removeItem(activeId)} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Remove">
               <Trash2 size={16} />
             </button>
-            <button onClick={resetAll} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Reset all">
+            <button type="button" onClick={resetAll} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Reset all">
               <X size={16} />
             </button>
           </div>
@@ -2414,7 +2552,7 @@ export default function App() {
           <PreviewFrame aspect={designAspect}>
             <div className="w-full h-full transparency-grid">
               <ZoomableImage
-                src={(activeItem?.originalUrl || "")}
+                src={activeItem?.originalUrl || ""}
                 alt="Original"
                 className="w-full h-full object-contain drop-shadow-2xl"
                 containerClassName="w-full h-full flex items-center justify-center"
@@ -2429,7 +2567,7 @@ export default function App() {
       <div className="glass-panel rounded-2xl p-3">
         <div className="flex items-center justify-between">
           <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Result • {viewMode === "mockup" ? "Mockup" : "Compare"}</div>
-          <button onClick={() => setMobileSettingsOpen(true)} className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-xs">
+          <button type="button" onClick={() => setMobileSettingsOpen(true)} className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-xs">
             Settings
           </button>
         </div>
@@ -2446,7 +2584,12 @@ export default function App() {
 
   /* ===================== MAIN RENDER ===================== */
   return (
-    <div className="h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]" onDrop={onDropAny} onDragOver={onDragOver} onDragLeave={onDragLeave}>
+    <div
+      className="h-[100dvh] flex flex-col bg-[#0c0c0f] text-slate-200 overflow-hidden font-['SF_Pro_Display',-apple-system,BlinkMacSystemFont,sans-serif]"
+      onDrop={onDropAny}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+    >
       <Toast toast={toast} onClose={() => setToast(null)} />
       <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
       {ProModal}
@@ -2458,22 +2601,19 @@ export default function App() {
         </div>
       )}
 
-      {!hasImage ? (
-        <div className="flex-1 overflow-hidden">{Landing}</div>
-      ) : (
-        <>{isDesktop ? DesktopWorkspace : MobileWorkspace}</>
-      )}
+      {!hasImage ? <div className="flex-1 overflow-hidden">{Landing}</div> : <>{isDesktop ? DesktopWorkspace : MobileWorkspace}</>}
 
-      {/* Mobile Settings Sheet (sticky footer) */}
+      {/* Mobile Settings Sheet */}
       <MobileSheet
         open={mobileSettingsOpen}
         title="Settings"
         onClose={() => setMobileSettingsOpen(false)}
         footer={
           <button
+            type="button"
             onClick={() => {
               setMobileSettingsOpen(false);
-              downloadActive();
+              downloadActivePng();
             }}
             disabled={!activeItem || processing}
             className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2"
@@ -2485,27 +2625,44 @@ export default function App() {
         <SidebarContent dense />
       </MobileSheet>
 
-      {/* Mobile Bottom Bar (HIDDEN when settings open => no overlap) */}
+      {/* Mobile Bottom Bar */}
       {!isDesktop && hasImage && !mobileSettingsOpen && (
         <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/90 backdrop-blur-xl pb-safe" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
           <div className="p-2 flex items-center gap-2">
-            <button onClick={handleUploadButton} className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm">
+            <button type="button" onClick={openFilePicker} className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm">
               Upload
             </button>
 
-            <button onClick={handlePasteButton} className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm">
+            <button type="button" onClick={handlePasteButton} className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm">
               Paste
             </button>
 
-            <button onClick={downloadActive} disabled={!activeItem || processing} className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40">
+            <button
+              type="button"
+              onClick={downloadActivePng}
+              disabled={!activeItem || processing}
+              className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40"
+            >
               PNG
             </button>
           </div>
         </div>
       )}
 
-      {/* global file input */}
-      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files?.[0])} />
+      {/* Global file input (MULTI) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files?.length) addFiles(files);
+          // reset input so selecting same file again works
+          e.target.value = "";
+        }}
+      />
     </div>
   );
 }
