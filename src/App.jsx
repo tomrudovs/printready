@@ -12,7 +12,6 @@ import {
   Sparkles,
   Sun,
   Moon,
-  Zap,
   Crown,
   Lock,
   ZoomIn,
@@ -22,12 +21,8 @@ import {
   Maximize2,
   SplitSquareHorizontal,
   HelpCircle,
-  ListPlus,
-  Trash2,
-  Layers,
-  Square,
-  CheckSquare,
   Package,
+  Trash2,
 } from "lucide-react";
 
 /* ===================== HELPERS ===================== */
@@ -83,12 +78,6 @@ function downloadBlob(blob, filename) {
 const tick = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 /* ===================== PRINT SIMULATION (RGB -> CMYK -> RGB) ===================== */
-/**
- * NOTE: PNG exports are RGB. This simulation is a practical POD preview:
- * - Convert RGB to CMYK
- * - Apply ink limit + mild dot gain
- * - Convert back to RGB for preview/export
- */
 function rgbToCmyk(r, g, b) {
   const R = r / 255,
     G = g / 255,
@@ -115,17 +104,16 @@ function cmykToRgb(c, m, y, k) {
 
 /**
  * settings:
- * - enabled: boolean
  * - inkLimit: 1.6..3.0 (sum(CMYK) cap)
  * - gain: 0..0.18 (dot gain feel)
  * - vibrance: 0.75..1.0 (slight desat like fabric/ink)
  */
 function applyCmykSimulation(pixels, settings) {
-  if (!settings?.enabled) return;
+  if (!settings) return;
 
   const inkLimit = clamp(settings.inkLimit ?? 2.2, 1.6, 3.0);
   const gain = clamp(settings.gain ?? 0.08, 0, 0.18);
-  const vibrance = clamp(settings.vibrance ?? 0.90, 0.75, 1);
+  const vibrance = clamp(settings.vibrance ?? 0.9, 0.75, 1);
 
   for (let i = 0; i < pixels.length; i += 4) {
     const a = pixels[i + 3];
@@ -135,13 +123,10 @@ function applyCmykSimulation(pixels, settings) {
       g0 = pixels[i + 1],
       b0 = pixels[i + 2];
 
-    // preserve near-black line-art feel
     const luma = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
 
-    // RGB -> CMYK
     let { c, m, y, k } = rgbToCmyk(r0, g0, b0);
 
-    // ink limit
     const total = c + m + y + k;
     if (total > inkLimit) {
       const s = inkLimit / total;
@@ -151,17 +136,14 @@ function applyCmykSimulation(pixels, settings) {
       k *= s;
     }
 
-    // dot gain: push K a bit, but not too much on highlights
     const hl = clamp((luma - 180) / 75, 0, 1);
     const kBoost = gain * (1 - hl);
     k = clamp(k + kBoost, 0, 1);
 
-    // mild fabric desat (reduce C/M/Y a touch)
     c *= vibrance;
     m *= vibrance;
     y *= vibrance;
 
-    // CMYK -> RGB
     const rgb = cmykToRgb(c, m, y, k);
     pixels[i] = rgb.r;
     pixels[i + 1] = rgb.g;
@@ -169,7 +151,7 @@ function applyCmykSimulation(pixels, settings) {
   }
 }
 
-/* ===================== CONTENT ANALYSIS (AUTO) ===================== */
+/* ===================== CONTENT ANALYSIS (SMART CMYK) ===================== */
 function analyzeForAuto(imgData) {
   const d = imgData.data;
   let n = 0;
@@ -209,32 +191,28 @@ function analyzeForAuto(imgData) {
 }
 
 function autoSimulateFromMetrics(metrics, isDarkShirt, isLineArt) {
-  // practical POD defaults
-  let enabled = true;
+  // Practical POD defaults (auto-tuned)
   let inkLimit = 2.2;
   let gain = isDarkShirt ? 0.06 : 0.09;
-  let vibrance = 0.90;
+  let vibrance = 0.9;
 
   if (isLineArt || metrics.isMostlyGray) {
     inkLimit = isDarkShirt ? 2.0 : 2.15;
     gain = isDarkShirt ? 0.05 : 0.08;
-    vibrance = 0.96; // don't kill line-art blacks/gray
+    vibrance = 0.96;
   } else if (metrics.isColorful) {
     inkLimit = isDarkShirt ? 2.05 : 2.2;
-    gain = isDarkShirt ? 0.06 : 0.10;
-    vibrance = isDarkShirt ? 0.88 : 0.90;
+    gain = isDarkShirt ? 0.06 : 0.1;
+    vibrance = isDarkShirt ? 0.88 : 0.9;
   }
 
-  // very bright art: avoid too much dot gain
   if (metrics.avgLuma > 190) gain = Math.max(0.04, gain - 0.02);
 
-  return { enabled, inkLimit, gain, vibrance };
+  return { inkLimit, gain, vibrance };
 }
 
 /* ===================== FAST CUTOUT + EXPORT ENGINE ===================== */
 const FastImageProcessor = {
-  clamp,
-
   detectBackground(imageData) {
     const { data, width, height } = imageData;
     let dark = 0,
@@ -297,18 +275,15 @@ const FastImageProcessor = {
         const sat = max - min;
         const luma = r * 0.299 + g * 0.587 + b * 0.114;
 
-        // remove near-white background
         if (luma > 245 && sat < 15) {
           data[i + 3] = 0;
           continue;
         }
 
-        // keep colored pixels
         if (sat > 16) {
           if (luma > 230) data[i + 3] = Math.max(0, 255 - (luma - 230) * 10);
           else data[i + 3] = 255;
         } else {
-          // gray-ish -> black ink
           let alpha = 255 - luma;
           if (luma > 215) alpha = 0;
           else alpha = Math.min(255, alpha * 1.4);
@@ -319,7 +294,6 @@ const FastImageProcessor = {
         }
       }
     } else {
-      // pure sketch mode
       for (let i = 0; i < len; i += 4) {
         const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
         if (gray > 225) data[i + 3] = 0;
@@ -335,7 +309,6 @@ const FastImageProcessor = {
   },
 
   async classify(canvas) {
-    // lightweight classifier: if low avg saturation => line-art-ish
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
       h = canvas.height;
@@ -358,66 +331,67 @@ const FastImageProcessor = {
     return { isLineArt: avgSat < 15 };
   },
 
-  // ---------- Quality tools ----------
-  fastBlur(data, width, height, radius) {
-    const len = width * height * 4;
-    const rad = Math.floor(radius);
-    const out = new Uint8ClampedArray(len);
+  cleanupAlpha(canvas) {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      if (a < 8) d[i + 3] = 0;
+      else if (a > 247) d[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  },
 
-    for (let y = 0; y < height; y++) {
-      const rowStart = y * width * 4;
-      for (let x = 0; x < width; x++) {
-        if (data[rowStart + x * 4 + 3] === 0) continue;
-        let r = 0,
-          g = 0,
-          b = 0,
-          c = 0;
-        const start = Math.max(0, x - rad);
-        const end = Math.min(width - 1, x + rad);
-        for (let k = start; k <= end; k++) {
-          const idx = rowStart + k * 4;
-          r += data[idx];
-          g += data[idx + 1];
-          b += data[idx + 2];
-          c++;
-        }
-        const i = rowStart + x * 4;
-        out[i] = r / c;
-        out[i + 1] = g / c;
-        out[i + 2] = b / c;
-        out[i + 3] = data[i + 3];
-      }
+  // Better resampling ladder; tuned for "Beast Mode" always
+  upscale(sourceCanvas, targetW, targetH, preferNearest = false) {
+    if (targetW <= sourceCanvas.width) {
+      const copy = document.createElement("canvas");
+      copy.width = targetW;
+      copy.height = targetH;
+      const ctx = copy.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
+      return copy;
     }
 
-    const final = new Uint8ClampedArray(len);
-    for (let x = 0; x < width; x++) {
-      for (let y = 0; y < height; y++) {
-        const idx = (y * width + x) * 4;
-        if (out[idx + 3] === 0) continue;
+    const srcW = sourceCanvas.width;
+    const scale = targetW / srcW;
 
-        let r = 0,
-          g = 0,
-          b = 0,
-          c = 0;
-        const start = Math.max(0, y - rad);
-        const end = Math.min(height - 1, y + rad);
-        for (let k = start; k <= end; k++) {
-          const kidx = (k * width + x) * 4;
-          r += out[kidx];
-          g += out[kidx + 1];
-          b += out[kidx + 2];
-          c++;
-        }
-        final[idx] = r / c;
-        final[idx + 1] = g / c;
-        final[idx + 2] = b / c;
-        final[idx + 3] = out[idx + 3];
-      }
+    // tighter steps => sharper & less blur (HQ default)
+    const stepMul = scale >= 6 ? 1.45 : scale >= 3 ? 1.55 : 1.65;
+
+    let current = sourceCanvas;
+    let curW = current.width;
+
+    while (curW * stepMul <= targetW) {
+      const nextW = Math.round(curW * stepMul);
+      const nextH = Math.round(current.height * stepMul);
+      const step = document.createElement("canvas");
+      step.width = nextW;
+      step.height = nextH;
+      const ctx = step.getContext("2d");
+      ctx.imageSmoothingEnabled = !preferNearest;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(current, 0, 0, nextW, nextH);
+      if (current !== sourceCanvas) current.width = 0;
+      current = step;
+      curW = nextW;
     }
+
+    const final = document.createElement("canvas");
+    final.width = targetW;
+    final.height = targetH;
+    const fctx = final.getContext("2d");
+    fctx.imageSmoothingEnabled = true;
+    fctx.imageSmoothingQuality = "high";
+    fctx.drawImage(current, 0, 0, targetW, targetH);
     return final;
   },
 
-  casSharpen(canvas, strength = 0.7) {
+  // Tiny CAS-like sharpen (fast)
+  casSharpen(canvas, strength = 0.78) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
       h = canvas.height;
@@ -448,7 +422,7 @@ const FastImageProcessor = {
         for (let c = 0; c < 3; c++) {
           const center = d[i + c];
           const avg = (d[iL + c] + d[iR + c] + d[iU + c] + d[iD + c]) * 0.25;
-          const v = center + (center - avg) * (0.75 + s * 0.9);
+          const v = center + (center - avg) * (0.85 + s * 0.9);
           out[i + c] = clamp(v, 0, 255);
         }
         out[i + 3] = a;
@@ -459,7 +433,8 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  deblockLite(canvas, strength = 0.42, flatThreshold = 18) {
+  // light deblock/flat smoothing (fast)
+  deblockLite(canvas, strength = 0.5, flatThreshold = 20) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const w = canvas.width,
       h = canvas.height;
@@ -497,100 +472,91 @@ const FastImageProcessor = {
     ctx.putImageData(img, 0, 0);
   },
 
-  cheapDenoise(canvas, strength = 0.45) {
-    const s = clamp(strength, 0, 0.85);
-    if (s <= 0.001) return;
+  // Beast-mode export (HQ always)
+  async exportFinal({
+    cutoutUrl,
+    cutoutW,
+    cutoutH,
+    targetW,
+    targetH,
+    simulateCmyk,
+    simSettings,
+    classification,
+    stageCb,
+  }) {
+    const start = performance.now();
+    const setStage = async (s) => {
+      stageCb?.(s);
+      await tick();
+    };
 
-    const w = canvas.width,
-      h = canvas.height;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    await setStage("Preparing…");
 
-    const ds = clamp(1 - s, 0.35, 0.85);
-    const dw = Math.max(1, Math.round(w * ds));
-    const dh = Math.max(1, Math.round(h * ds));
+    const img = new Image();
+    img.src = cutoutUrl;
+    await new Promise((r) => (img.onload = r));
 
-    const tmp = document.createElement("canvas");
-    tmp.width = dw;
-    tmp.height = dh;
-    const tctx = tmp.getContext("2d");
+    const tW = targetW > 0 ? targetW : cutoutW;
+    const tH = targetH > 0 ? targetH : cutoutH;
 
-    tctx.imageSmoothingEnabled = true;
-    tctx.imageSmoothingQuality = "high";
-    tctx.drawImage(canvas, 0, 0, dw, dh);
+    const scale = Math.min(tW / cutoutW, tH / cutoutH);
+    const finalW = Math.max(1, Math.round(cutoutW * scale));
+    const finalH = Math.max(1, Math.round(cutoutH * scale));
 
-    ctx.clearRect(0, 0, w, h);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(tmp, 0, 0, w, h);
+    const tempC = document.createElement("canvas");
+    tempC.width = cutoutW;
+    tempC.height = cutoutH;
+    tempC.getContext("2d").drawImage(img, 0, 0);
 
-    tmp.width = 0;
-  },
+    const isLineArt = !!classification?.isLineArt;
+    const preferNearest = isLineArt; // crisp edges for line-art
 
-  cleanupAlpha(canvas) {
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const a = d[i + 3];
-      if (a < 8) d[i + 3] = 0;
-      else if (a > 247) d[i + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-  },
+    await setStage(scale > 1.12 ? "Upscaling…" : "Resizing…");
+    const upscaled = this.upscale(tempC, finalW, finalH, preferNearest);
+    tempC.width = 0;
 
-  // Better resampling ladder; HQ uses smaller steps
-  upscale(sourceCanvas, targetW, targetH, mode = "auto", quality = "auto") {
-    if (targetW <= sourceCanvas.width) {
-      const copy = document.createElement("canvas");
-      copy.width = targetW;
-      copy.height = targetH;
-      const ctx = copy.getContext("2d");
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
-      return copy;
-    }
+    const isUpscale = scale > 1.12;
 
-    const srcW = sourceCanvas.width;
-    const scale = targetW / srcW;
-    const isSmall = Math.max(sourceCanvas.width, sourceCanvas.height) <= 900;
-    const preferNearest = mode === "nearest" || (mode === "auto" && isSmall);
+    if (isUpscale) {
+      await setStage("Refining…");
+      this.deblockLite(upscaled, isLineArt ? 0.25 : 0.52, isLineArt ? 16 : 22);
+      this.casSharpen(upscaled, isLineArt ? 0.62 : 0.86);
 
-    const stepMul =
-      quality === "hq"
-        ? 1.32
-        : scale >= 6
-        ? 1.5
-        : scale >= 3
-        ? 1.65
-        : 1.8;
-
-    let current = sourceCanvas;
-    let curW = current.width;
-
-    while (curW * stepMul <= targetW) {
-      const nextW = Math.round(curW * stepMul);
-      const nextH = Math.round(current.height * stepMul);
-      const step = document.createElement("canvas");
-      step.width = nextW;
-      step.height = nextH;
-      const ctx = step.getContext("2d");
-      ctx.imageSmoothingEnabled = !preferNearest;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(current, 0, 0, nextW, nextH);
-      if (current !== sourceCanvas) current.width = 0;
-      current = step;
-      curW = nextW;
+      if (!isLineArt) {
+        // extra micro-pass for photos
+        this.deblockLite(upscaled, 0.22, 16);
+        this.casSharpen(upscaled, 0.55);
+      }
+    } else {
+      await setStage("Sharpening…");
+      this.casSharpen(upscaled, isLineArt ? 0.6 : 0.72);
     }
 
-    const final = document.createElement("canvas");
-    final.width = targetW;
-    final.height = targetH;
-    const fctx = final.getContext("2d");
-    fctx.imageSmoothingEnabled = true;
-    fctx.imageSmoothingQuality = "high";
-    fctx.drawImage(current, 0, 0, targetW, targetH);
-    return final;
+    await setStage("Compositing…");
+    const out = document.createElement("canvas");
+    out.width = tW;
+    out.height = tH;
+    const ctx = out.getContext("2d", { willReadFrequently: true });
+    const dx = Math.round((tW - finalW) / 2);
+    const dy = Math.round((tH - finalH) / 2);
+    ctx.drawImage(upscaled, dx, dy);
+    upscaled.width = 0;
+
+    if (simulateCmyk) {
+      await setStage("Simulating CMYK…");
+      const data = ctx.getImageData(0, 0, tW, tH);
+      applyCmykSimulation(data.data, simSettings);
+      ctx.putImageData(data, 0, 0);
+    }
+
+    this.cleanupAlpha(out);
+
+    await setStage("Encoding PNG…");
+    const blob = await new Promise((resolve, reject) => {
+      out.toBlob((b) => (b ? resolve(b) : reject(new Error("Canvas blob failed"))), "image/png");
+    });
+
+    return { blob, width: tW, height: tH, ms: performance.now() - start };
   },
 
   async createCutoutFromFile(file) {
@@ -630,106 +596,6 @@ const FastImageProcessor = {
       ms: performance.now() - start,
     };
   },
-
-  async exportFinal({
-    cutoutUrl,
-    cutoutW,
-    cutoutH,
-    targetW,
-    targetH,
-    simulationSettings,
-    classification,
-    quality = "auto",
-    stageCb,
-  }) {
-    const start = performance.now();
-    const setStage = async (s) => {
-      stageCb?.(s);
-      await tick();
-    };
-
-    await setStage("Preparing…");
-
-    const img = new Image();
-    img.src = cutoutUrl;
-    await new Promise((r) => (img.onload = r));
-
-    const tW = targetW > 0 ? targetW : cutoutW;
-    const tH = targetH > 0 ? targetH : cutoutH;
-
-    const scale = Math.min(tW / cutoutW, tH / cutoutH);
-    const finalW = Math.max(1, Math.round(cutoutW * scale));
-    const finalH = Math.max(1, Math.round(cutoutH * scale));
-
-    const tempC = document.createElement("canvas");
-    tempC.width = cutoutW;
-    tempC.height = cutoutH;
-    tempC.getContext("2d").drawImage(img, 0, 0);
-
-    const isLineArt = !!classification?.isLineArt;
-    const upscaleMode = isLineArt ? "nearest" : "auto";
-
-    await setStage(scale > 1.15 ? "Upscaling…" : "Resizing…");
-    const upscaledCanvas = this.upscale(tempC, finalW, finalH, upscaleMode, quality);
-    tempC.width = 0;
-
-    const isUpscale = scale > 1.15;
-    const s = scale;
-
-    // Make HQ actually different
-    const hq = quality === "hq";
-    const denoiseStrength = hq ? (s >= 4 ? 0.56 : 0.42) : s >= 4 ? 0.44 : 0.30;
-    const casStrength = hq ? (s >= 4 ? 0.86 : 0.74) : s >= 4 ? 0.72 : 0.62;
-    const deblockStrength = hq ? (s >= 4 ? 0.52 : 0.42) : s >= 4 ? 0.40 : 0.32;
-    const flatThr = hq ? (s >= 4 ? 22 : 20) : s >= 4 ? 20 : 18;
-
-    if (isUpscale) {
-      await setStage("Deblocking…");
-      this.deblockLite(upscaledCanvas, deblockStrength, flatThr);
-
-      await setStage("Denoising…");
-      this.cheapDenoise(upscaledCanvas, denoiseStrength);
-
-      await setStage("Sharpening…");
-      this.casSharpen(upscaledCanvas, casStrength);
-
-      // HQ extra pass for photos
-      if (hq && !isLineArt) {
-        await setStage("Refining…");
-        this.deblockLite(upscaledCanvas, 0.22, 16);
-        this.casSharpen(upscaledCanvas, 0.55);
-      }
-    } else if (isLineArt) {
-      await setStage("Sharpening…");
-      this.casSharpen(upscaledCanvas, hq ? 0.66 : 0.58);
-    }
-
-    await setStage("Compositing…");
-    const out = document.createElement("canvas");
-    out.width = tW;
-    out.height = tH;
-    const ctx = out.getContext("2d", { willReadFrequently: true });
-    const dx = Math.round((tW - finalW) / 2);
-    const dy = Math.round((tH - finalH) / 2);
-    ctx.drawImage(upscaledCanvas, dx, dy);
-    upscaledCanvas.width = 0;
-
-    if (simulationSettings?.enabled) {
-      await setStage("Simulating print…");
-      const data = ctx.getImageData(0, 0, tW, tH);
-      applyCmykSimulation(data.data, simulationSettings);
-      ctx.putImageData(data, 0, 0);
-    }
-
-    this.cleanupAlpha(out);
-
-    await setStage("Encoding PNG…");
-    const blob = await new Promise((resolve, reject) => {
-      out.toBlob((b) => (b ? resolve(b) : reject("Canvas blob failed")), "image/png");
-    });
-
-    return { blob, width: tW, height: tH, ms: performance.now() - start };
-  },
 };
 
 /* ===================== TOAST ===================== */
@@ -745,11 +611,7 @@ function Toast({ toast, onClose }) {
   return (
     <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[80] px-3">
       <div className="bg-black/80 border border-white/10 backdrop-blur-xl rounded-2xl px-4 py-3 shadow-2xl flex items-start gap-3 max-w-[92vw]">
-        <div
-          className={`mt-0.5 w-2.5 h-2.5 rounded-full ${
-            toast.type === "error" ? "bg-rose-500" : "bg-emerald-400"
-          }`}
-        />
+        <div className={`mt-0.5 w-2.5 h-2.5 rounded-full ${toast.type === "error" ? "bg-rose-500" : "bg-emerald-400"}`} />
         <div className="text-sm text-slate-200 leading-snug">{toast.msg}</div>
         <button type="button" onClick={onClose} className="ml-2 text-slate-400 hover:text-white">
           <X size={16} />
@@ -1097,7 +959,7 @@ function CompareView({ beforeSrc, afterSrc, afterStyle, defaultZoom = 1.12 }) {
 /* ===================== FIXED-ASPECT PREVIEW FRAME ===================== */
 function PreviewFrame({ aspect = 1, children }) {
   return (
-    <div className="w-full h-full flex items-center justify-center p-3 sm:p-6">
+    <div className="w-full h-full flex items-center justify-center p-2 sm:p-4">
       <div className="w-full max-w-full max-h-full rounded-2xl overflow-hidden relative" style={{ aspectRatio: aspect }}>
         {children}
       </div>
@@ -1110,7 +972,6 @@ function ShortcutsModal({ open, onClose }) {
   if (!open) return null;
   const shortcuts = [
     { keys: "Ctrl/⌘ + V", desc: "Paste image (desktop, most browsers)" },
-    { keys: "Shift + /  ( ? )", desc: "Open/close shortcuts" },
     { keys: "Wheel / Pinch", desc: "Zoom in/out in preview" },
     { keys: "Double Tap/Click", desc: "Quick zoom 1× ↔ 2×" },
     { keys: "Drag (zoomed)", desc: "Pan around the image" },
@@ -1126,7 +987,7 @@ function ShortcutsModal({ open, onClose }) {
               <HelpCircle size={18} className="text-violet-300" />
             </div>
             <div>
-              <div className="text-white font-bold">Keyboard & Touch Shortcuts</div>
+              <div className="text-white font-bold">Shortcuts</div>
               <div className="text-[11px] text-slate-500">Fast workflow tips</div>
             </div>
           </div>
@@ -1154,124 +1015,39 @@ function ShortcutsModal({ open, onClose }) {
   );
 }
 
-/* ===================== MOBILE SETTINGS SHEET ===================== */
-function MobileSheet({ open, title, onClose, children, footer }) {
-  const startY = useRef(null);
-  const dragging = useRef(false);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose?.();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 md:hidden">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div
-        className="absolute bottom-0 left-0 right-0 max-h-[82vh] rounded-t-3xl bg-[#0c0c0f] border-t border-white/10 overflow-hidden pb-safe flex flex-col"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
-      >
-        <div
-          className="p-3 border-b border-white/10 shrink-0"
-          onPointerDown={(e) => {
-            dragging.current = true;
-            startY.current = e.clientY;
-          }}
-          onPointerMove={(e) => {
-            if (!dragging.current) return;
-            if (startY.current == null) return;
-            const dy = e.clientY - startY.current;
-            if (dy > 140) {
-              dragging.current = false;
-              startY.current = null;
-              onClose?.();
-            }
-          }}
-          onPointerUp={() => {
-            dragging.current = false;
-            startY.current = null;
-          }}
-          onPointerCancel={() => {
-            dragging.current = false;
-            startY.current = null;
-          }}
-          style={{ touchAction: "pan-y" }}
-        >
-          <div className="mx-auto w-12 h-1.5 rounded-full bg-white/10 mb-2" />
-          <div className="flex items-center justify-between">
-            <div className="text-white font-bold">{title}</div>
-            <button type="button" onClick={onClose} className="p-2 rounded-xl hover:bg-white/5 text-slate-300" aria-label="Close settings">
-              <X size={18} />
-            </button>
-          </div>
-          <div className="text-[10px] text-slate-500 mt-1">Swipe down, tap outside, or press Esc</div>
-        </div>
-
-        <div className="p-4 overflow-y-auto flex-1">{children}</div>
-
-        {footer && <div className="p-4 border-t border-white/10 bg-[#08080a] shrink-0">{footer}</div>}
-      </div>
-    </div>
-  );
-}
-
 /* ===================== MAIN APP ===================== */
 export default function App() {
   const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const MAX_DIMENSION = 8000;
 
-  // Items
-  const [items, setItems] = useState([]); // {id, file, name, originalUrl, cutoutUrl, meta}
+  // Items: {id, file, name, originalUrl, cutoutUrl, meta:{width,height,detectedBackground,hasColors,classification,metrics}}
+  const [items, setItems] = useState([]);
   const [activeId, setActiveId] = useState(null);
 
   const activeItem = useMemo(() => items.find((x) => x.id === activeId) || null, [items, activeId]);
-  const hasImage = !!activeItem?.originalUrl;
-
-  // Batch selection (multi-select)
-  const [selectedIds, setSelectedIds] = useState(() => new Set());
-  const selectedCount = selectedIds.size;
+  const hasImage = !!activeItem?.originalUrl && !!activeItem?.cutoutUrl;
 
   // UI
   const [viewMode, setViewMode] = useState("compare"); // compare | mockup
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
-  // processing
+  // Processing overlay
   const [cutting, setCutting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStage, setExportStage] = useState("");
   const processing = cutting || exporting;
 
-  // Simulation settings (CMYK preview)
-  const [simulation, setSimulation] = useState({
-    enabled: true,
-    inkLimit: 2.2,
-    gain: 0.08,
-    vibrance: 0.90,
-  });
-  const [autoSimulateOn, setAutoSimulateOn] = useState(true);
+  // Smart CMYK (single toggle)
+  const [simulateCmyk, setSimulateCmyk] = useState(true);
 
-  // Quality
-  const [enhanceQuality, setEnhanceQuality] = useState("auto"); // auto | hq
-
-  // colors (mockup only)
+  // Mockup color
   const [selectedColor, setSelectedColor] = useState("black");
 
-  // presets (export only)
+  // Export preset
   const [selectedPreset, setSelectedPreset] = useState("original");
   const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0 });
-  const [customWidth, setCustomWidth] = useState("");
-  const [customHeight, setCustomHeight] = useState("");
-  const [showCustomInput, setShowCustomInput] = useState(false);
-  const MAX_DIMENSION = 8000;
 
-  // pro gating (kept)
+  // pro gating (kept minimal)
   const [isPro, setIsPro] = useState(false);
   const [showProModal, setShowProModal] = useState(false);
   const FREE_LIMIT = 5;
@@ -1347,18 +1123,43 @@ export default function App() {
     return w / h;
   }, [activeItem]);
 
-  // preview filter = CMYK simulation (applied live via canvas would be heavy),
-  // so we do a light CSS feel: keep none. Real simulation happens in exportFinal.
-  // For preview realism without re-render cost, we keep it simple:
-  const previewHintStyle = useMemo(() => {
-    // tiny desat/contrast feel; optional and fast
-    if (!simulation.enabled) return {};
-    return { filter: "saturate(0.98) contrast(0.98) brightness(0.98)" };
-  }, [simulation.enabled]);
+  // super-light preview hint (no heavy per-frame simulation)
+  const previewHintStyle = useMemo(() => (simulateCmyk ? { filter: "saturate(0.98) contrast(0.98) brightness(0.985)" } : {}), [simulateCmyk]);
+
+  /* ===================== PRESETS ===================== */
+  const presets = useMemo(
+    () => [
+      { id: "original", label: "Original", width: 0, height: 0, desc: "No resize" },
+      { id: "tshirt", label: "T-Shirt", width: 4500, height: 5400, desc: "4500×5400" },
+      { id: "hoodie", label: "Hoodie", width: 4500, height: 4800, desc: "4500×4800" },
+      { id: "mug", label: "Mug 11oz", width: 2700, height: 1100, desc: "2700×1100" },
+      { id: "poster", label: "Poster 18×24", width: 5400, height: 7200, desc: "5400×7200", pro: true },
+      { id: "phone", label: "Phone Case", width: 1300, height: 2000, desc: "1300×2000" },
+    ],
+    []
+  );
 
   /* ===================== FILE INPUT + MULTI UPLOAD ===================== */
   const fileInputRef = useRef(null);
   const openFilePicker = useCallback(() => fileInputRef.current?.click(), []);
+
+  const computeMetricsForCutout = useCallback(async (cutoutUrl, w, h) => {
+    const tmp = document.createElement("canvas");
+    tmp.width = w;
+    tmp.height = h;
+    const ctx = tmp.getContext("2d", { willReadFrequently: true });
+    const img = new Image();
+    img.src = cutoutUrl;
+    await new Promise((r) => (img.onload = r));
+    ctx.drawImage(img, 0, 0);
+
+    const sw = Math.min(520, tmp.width);
+    const sh = Math.min(520, tmp.height);
+    const x = Math.floor((tmp.width - sw) / 2);
+    const y = Math.floor((tmp.height - sh) / 2);
+    const data = ctx.getImageData(x, y, sw, sh);
+    return analyzeForAuto(data);
+  }, []);
 
   const processOneFile = useCallback(
     async (file) => {
@@ -1374,12 +1175,24 @@ export default function App() {
 
       const result = await FastImageProcessor.createCutoutFromFile(file);
 
+      // pick default shirt color based on detected bg (practical)
+      const defaultColor = result.detectedBackground === "black" ? "black" : "white";
+
+      // Smart CMYK metrics (once)
+      let metrics = null;
+      try {
+        metrics = await computeMetricsForCutout(result.cutoutUrl, result.width, result.height);
+      } catch {
+        metrics = null;
+      }
+
       const meta = {
         width: result.width,
         height: result.height,
         detectedBackground: result.detectedBackground,
         hasColors: result.hasColors,
         classification: result.classification,
+        metrics,
         ms: result.ms,
       };
 
@@ -1392,36 +1205,8 @@ export default function App() {
         meta,
       };
 
-      // auto defaults: set shirt color based on detected bg (practical)
-      const defaultColor = meta.detectedBackground === "black" ? "black" : "white";
-      const localIsDarkShirt = defaultColor !== "white";
-
-      // auto simulate: fast center sample
-      if (autoSimulateOn) {
-        try {
-          const tmp = document.createElement("canvas");
-          tmp.width = meta.width;
-          tmp.height = meta.height;
-          const ctx = tmp.getContext("2d", { willReadFrequently: true });
-          const img = new Image();
-          img.src = result.cutoutUrl;
-          await new Promise((r) => (img.onload = r));
-          ctx.drawImage(img, 0, 0);
-
-          const sw = Math.min(520, tmp.width);
-          const sh = Math.min(520, tmp.height);
-          const x = Math.floor((tmp.width - sw) / 2);
-          const y = Math.floor((tmp.height - sh) / 2);
-          const data = ctx.getImageData(x, y, sw, sh);
-          const metrics = analyzeForAuto(data);
-
-          const auto = autoSimulateFromMetrics(metrics, localIsDarkShirt, !!meta.classification?.isLineArt);
-          setSimulation(auto);
-        } catch {}
-      }
-
       setSelectedColor(defaultColor);
-      setViewMode("compare");
+      setViewMode("mockup"); // WOW default (compare still one tap away)
 
       const newCount = usageCount + 1;
       setUsageCount(newCount);
@@ -1429,7 +1214,7 @@ export default function App() {
 
       return newItem;
     },
-    [autoSimulateOn, isPro, usageCount]
+    [computeMetricsForCutout, isPro, usageCount]
   );
 
   const addFiles = useCallback(
@@ -1453,17 +1238,8 @@ export default function App() {
             const next = [...added.reverse(), ...prev].slice(0, 40);
             return next;
           });
-
           const first = added[added.length - 1];
           setActiveId(first?.id || null);
-
-          // auto select added items for batch
-          setSelectedIds((prev) => {
-            const next = new Set(prev);
-            added.forEach((x) => next.add(x.id));
-            return next;
-          });
-
           showToast(`Added ${added.length} image(s).`, "ok");
         }
       } catch (e) {
@@ -1479,7 +1255,6 @@ export default function App() {
 
   /* ===================== PASTE FROM CLIPBOARD ===================== */
   const pasteFromClipboard = useCallback(async () => {
-    // Desktop: try Clipboard API
     try {
       if (!navigator.clipboard?.read) return null;
       const clipItems = await navigator.clipboard.read();
@@ -1502,7 +1277,6 @@ export default function App() {
       addFiles([file]);
       return;
     }
-    // Mobile/tablet fallback: open file picker (always works)
     showToast("Paste not supported here — opening Upload.", "error");
     openFilePicker();
   }, [pasteFromClipboard, addFiles, showToast, openFilePicker]);
@@ -1529,7 +1303,7 @@ export default function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, [addFiles]);
 
-  /* ===================== SHORTCUTS TOGGLE ===================== */
+  /* ===================== SHORTCUTS ===================== */
   useEffect(() => {
     const onKeyDown = (e) => {
       if (isTypingTarget(document.activeElement)) return;
@@ -1537,11 +1311,10 @@ export default function App() {
         e.preventDefault();
         setShowShortcuts((s) => !s);
       }
-      if (!isDesktop && e.key === "Escape" && mobileSettingsOpen) setMobileSettingsOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isDesktop, mobileSettingsOpen]);
+  }, []);
 
   /* ===================== DRAG & DROP ===================== */
   const onDragOver = useCallback((e) => {
@@ -1564,7 +1337,7 @@ export default function App() {
   );
 
   /* ===================== REMOVE / RESET ===================== */
-  const resetAll = useCallback(() => {
+  const clearAll = useCallback(() => {
     setItems((prev) => {
       prev.forEach((it) => {
         try {
@@ -1577,13 +1350,9 @@ export default function App() {
       return [];
     });
     setActiveId(null);
-    setSelectedIds(new Set());
     setViewMode("compare");
     setSelectedPreset("original");
     setTargetDimensions({ width: 0, height: 0 });
-    setCustomWidth("");
-    setCustomHeight("");
-    setShowCustomInput(false);
     setExportStage("");
   }, []);
 
@@ -1600,50 +1369,45 @@ export default function App() {
             URL.revokeObjectURL(removed.cutoutUrl);
           } catch {}
         }
-
-        // active fallback
         if (id === activeId) setActiveId(next[0]?.id || null);
-
         return next;
-      });
-
-      setSelectedIds((prev) => {
-        const n = new Set(prev);
-        n.delete(id);
-        return n;
       });
     },
     [activeId]
   );
 
-  /* ===================== PRESET LIST ===================== */
-  const presets = useMemo(
-    () => [
-      { id: "original", label: "Original", width: 0, height: 0, desc: "No resize" },
-      { id: "tshirt", label: "T-Shirt", width: 4500, height: 5400, desc: "4500×5400" },
-      { id: "hoodie", label: "Hoodie", width: 4500, height: 4800, desc: "4500×4800" },
-      { id: "mug", label: "Mug 11oz", width: 2700, height: 1100, desc: "2700×1100" },
-      { id: "poster", label: "Poster 18×24", width: 5400, height: 7200, desc: "5400×7200", pro: true },
-      { id: "phone", label: "Phone Case", width: 1300, height: 2000, desc: "1300×2000" },
-    ],
-    []
-  );
+  /* ===================== SMART SIM SETTINGS (derived) ===================== */
+  const activeSimSettings = useMemo(() => {
+    const m = activeItem?.meta?.metrics;
+    const isLineArt = !!activeItem?.meta?.classification?.isLineArt;
+    if (!m) return autoSimulateFromMetrics({ avgSat: 0.14, avgLuma: 140, grayRatio: 0.5, isMostlyGray: false, isColorful: false }, isDarkShirt, isLineArt);
+    return autoSimulateFromMetrics(m, isDarkShirt, isLineArt);
+  }, [activeItem, isDarkShirt]);
 
-  /* ===================== DOWNLOAD PNG (ACTIVE ONLY) ===================== */
+  /* ===================== DOWNLOAD PNG (ACTIVE) ===================== */
   const downloadActivePng = useCallback(async () => {
     if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
+
     setExporting(true);
     setExportStage("Preparing…");
     try {
+      const needsProPreset = presets.find((p) => p.id === selectedPreset)?.pro && !isPro;
+      if (needsProPreset) {
+        setShowProModal(true);
+        setExporting(false);
+        setExportStage("");
+        return;
+      }
+
       const res = await FastImageProcessor.exportFinal({
         cutoutUrl: activeItem.cutoutUrl,
         cutoutW: activeItem.meta.width,
         cutoutH: activeItem.meta.height,
         targetW: targetDimensions.width,
         targetH: targetDimensions.height,
-        simulationSettings: simulation,
+        simulateCmyk,
+        simSettings: activeSimSettings,
         classification: activeItem.meta.classification,
-        quality: enhanceQuality,
         stageCb: (s) => setExportStage(s),
       });
 
@@ -1656,25 +1420,21 @@ export default function App() {
       setExporting(false);
       setExportStage("");
     }
-  }, [activeItem, targetDimensions.width, targetDimensions.height, simulation, enhanceQuality, showToast]);
+  }, [activeItem, targetDimensions.width, targetDimensions.height, simulateCmyk, activeSimSettings, showToast, presets, selectedPreset, isPro]);
 
-  /* ===================== ZIP (SELECTED ONLY) ===================== */
+  /* ===================== ZIP (ALL ITEMS) ===================== */
   const getZipLib = useCallback(async () => {
-    // 1) Try installed package
     try {
       const mod = await import("jszip");
       return mod.default || mod;
     } catch {}
-    // 2) Try CDN
     if (window.JSZip) return window.JSZip;
     return null;
   }, []);
 
-  const downloadSelectedZip = useCallback(async () => {
-    const ids = Array.from(selectedIds);
-    const selectedItems = items.filter((it) => ids.includes(it.id));
-    if (!selectedItems.length) {
-      showToast("Select at least 1 image for ZIP.", "error");
+  const downloadZipAll = useCallback(async () => {
+    if (!items.length) {
+      showToast("Add at least 1 image for ZIP.", "error");
       return;
     }
 
@@ -1683,15 +1443,20 @@ export default function App() {
 
     try {
       const JSZip = await getZipLib();
-      if (!JSZip) {
-        throw new Error("ZIP library missing. Install 'jszip' or add JSZip CDN.");
-      }
+      if (!JSZip) throw new Error("ZIP library missing. Install 'jszip' or add JSZip CDN.");
+
       const zip = new JSZip();
 
-      for (let idx = 0; idx < selectedItems.length; idx++) {
-        const it = selectedItems[idx];
-        setExportStage(`Exporting ${idx + 1}/${selectedItems.length}…`);
+      for (let idx = 0; idx < items.length; idx++) {
+        const it = items[idx];
+        setExportStage(`Exporting ${idx + 1}/${items.length}…`);
         await tick();
+
+        const isLineArt = !!it.meta?.classification?.isLineArt;
+        const metrics = it.meta?.metrics;
+        const sim = metrics
+          ? autoSimulateFromMetrics(metrics, isDarkShirt, isLineArt)
+          : autoSimulateFromMetrics({ avgSat: 0.14, avgLuma: 140, grayRatio: 0.5, isMostlyGray: false, isColorful: false }, isDarkShirt, isLineArt);
 
         const res = await FastImageProcessor.exportFinal({
           cutoutUrl: it.cutoutUrl,
@@ -1699,9 +1464,9 @@ export default function App() {
           cutoutH: it.meta.height,
           targetW: targetDimensions.width,
           targetH: targetDimensions.height,
-          simulationSettings: simulation,
+          simulateCmyk,
+          simSettings: sim,
           classification: it.meta.classification,
-          quality: enhanceQuality,
           stageCb: () => {},
         });
 
@@ -1713,7 +1478,7 @@ export default function App() {
       setExportStage("Creating ZIP…");
       const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
       downloadBlob(zipBlob, `printready-batch-${Date.now()}.zip`);
-      showToast(`ZIP downloaded (${selectedItems.length}).`, "ok");
+      showToast(`ZIP downloaded (${items.length}).`, "ok");
     } catch (e) {
       console.error(e);
       showToast(e?.message || "Batch export failed.", "error");
@@ -1721,401 +1486,7 @@ export default function App() {
       setExporting(false);
       setExportStage("");
     }
-  }, [selectedIds, items, targetDimensions.width, targetDimensions.height, simulation, enhanceQuality, showToast, getZipLib]);
-
-  /* ===================== AUTO SIMULATE NOW (for current active) ===================== */
-  const runAutoSimulateNow = useCallback(async () => {
-    if (!activeItem?.cutoutUrl || !activeItem?.meta) return;
-    try {
-      const tmp = document.createElement("canvas");
-      tmp.width = activeItem.meta.width;
-      tmp.height = activeItem.meta.height;
-      const ctx = tmp.getContext("2d", { willReadFrequently: true });
-      const img = new Image();
-      img.src = activeItem.cutoutUrl;
-      await new Promise((r) => (img.onload = r));
-      ctx.drawImage(img, 0, 0);
-
-      const sw = Math.min(520, tmp.width);
-      const sh = Math.min(520, tmp.height);
-      const x = Math.floor((tmp.width - sw) / 2);
-      const y = Math.floor((tmp.height - sh) / 2);
-      const data = ctx.getImageData(x, y, sw, sh);
-      const metrics = analyzeForAuto(data);
-
-      const auto = autoSimulateFromMetrics(metrics, isDarkShirt, !!activeItem.meta.classification?.isLineArt);
-      setSimulation(auto);
-      showToast("Auto simulation applied.", "ok");
-    } catch {
-      showToast("Auto simulation failed on this image.", "error");
-    }
-  }, [activeItem, isDarkShirt, showToast]);
-
-  /* ===================== SIDEBAR CONTENT ===================== */
-  const SidebarContent = useCallback(
-    ({ dense = false, hideColorSection = false }) => (
-      <div className={`${dense ? "space-y-5" : "space-y-6"}`}>
-        {/* Export size */}
-        <section className="glass-panel rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-              <Maximize2 size={14} className="text-violet-400" /> Export Size
-            </h3>
-            <div className="text-[10px] text-slate-500">Preview stays stable</div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {presets.map((preset) => {
-              const needsPro = preset.pro && !isPro;
-              return (
-                <button
-                  type="button"
-                  key={preset.id}
-                  onClick={() => {
-                    if (needsPro) {
-                      setShowProModal(true);
-                      return;
-                    }
-                    setSelectedPreset(preset.id);
-                    setTargetDimensions({ width: preset.width, height: preset.height });
-                    setShowCustomInput(false);
-                  }}
-                  className={[
-                    "py-2.5 px-2 rounded-lg text-center transition-all relative",
-                    selectedPreset === preset.id && !showCustomInput
-                      ? "bg-violet-600 text-white"
-                      : needsPro
-                      ? "bg-slate-800/50 text-slate-500"
-                      : "bg-slate-800/50 text-slate-300 hover:bg-slate-700",
-                  ].join(" ")}
-                >
-                  {needsPro && <Lock size={10} className="absolute top-1 right-1 text-slate-600" />}
-                  <div className="font-semibold text-xs">{preset.label}</div>
-                  <div className="text-[9px] opacity-70">{preset.desc}</div>
-                </button>
-              );
-            })}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setShowCustomInput(!showCustomInput);
-              if (!showCustomInput) setSelectedPreset("custom");
-            }}
-            className={[
-              "w-full mt-2 py-2.5 px-3 rounded-lg text-center transition-all",
-              showCustomInput ? "bg-violet-600 text-white" : "bg-slate-800/50 text-slate-300 hover:bg-slate-700",
-            ].join(" ")}
-          >
-            <div className="font-semibold text-xs">Custom Size</div>
-            <div className="text-[9px] opacity-70">
-              Up to {MAX_DIMENSION}×{MAX_DIMENSION}px
-            </div>
-          </button>
-
-          {showCustomInput && (
-            <div className="mt-3 space-y-2">
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <label className="text-[10px] text-slate-500 mb-1 block">Width</label>
-                  <input
-                    type="number"
-                    value={customWidth}
-                    onChange={(e) => setCustomWidth(e.target.value)}
-                    placeholder="4500"
-                    max={MAX_DIMENSION}
-                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-
-                <div className="flex items-end pb-2 text-slate-500">×</div>
-
-                <div className="flex-1">
-                  <label className="text-[10px] text-slate-500 mb-1 block">Height</label>
-                  <input
-                    type="number"
-                    value={customHeight}
-                    onChange={(e) => setCustomHeight(e.target.value)}
-                    placeholder="5400"
-                    max={MAX_DIMENSION}
-                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const w = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customWidth, 10) || 0));
-                  const h = Math.min(MAX_DIMENSION, Math.max(0, parseInt(customHeight, 10) || 0));
-                  if (w > 0 && h > 0) setTargetDimensions({ width: w, height: h });
-                }}
-                className="w-full py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-xs font-medium text-white transition-all"
-              >
-                Apply Custom Size
-              </button>
-            </div>
-          )}
-        </section>
-
-        {/* Mockup colors */}
-        {!hideColorSection && (
-          <section>
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Mockup Colors</h3>
-            <div className="mb-4">
-              <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1">
-                <Moon size={10} /> Dark
-              </span>
-              <div className="grid grid-cols-6 gap-2">
-                {shirtColors.dark.map((c) => (
-                  <button
-                    type="button"
-                    key={c.name}
-                    onClick={() => setSelectedColor(c.name)}
-                    title={c.label}
-                    className={[
-                      "h-9 rounded-lg border-2 transition-all",
-                      selectedColor === c.name ? "border-violet-500 scale-110 shadow-lg shadow-violet-500/20" : "border-transparent hover:border-white/20",
-                    ].join(" ")}
-                    style={{ backgroundColor: c.bg }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <span className="text-[10px] text-slate-600 mb-2 block flex items-center gap-1">
-                <Sun size={10} /> Light
-              </span>
-              <div className="grid grid-cols-6 gap-2">
-                {shirtColors.light.map((c) => (
-                  <button
-                    type="button"
-                    key={c.name}
-                    onClick={() => setSelectedColor(c.name)}
-                    title={c.label}
-                    className={[
-                      "h-9 rounded-lg border-2 transition-all",
-                      selectedColor === c.name ? "border-violet-500 scale-110 shadow-lg shadow-violet-500/20" : "border-transparent hover:border-white/20",
-                    ].join(" ")}
-                    style={{ backgroundColor: c.bg }}
-                  />
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* Print Simulation (CMYK) */}
-        <section className="glass-panel rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-              <Sliders size={14} className="text-violet-400" /> Print Simulation (CMYK)
-            </h3>
-            <button
-              type="button"
-              onClick={() => setAutoSimulateOn((v) => !v)}
-              className={`text-[10px] px-2 py-1 rounded-full border ${
-                autoSimulateOn ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" : "border-white/10 bg-white/5 text-slate-300"
-              }`}
-              title="Auto analyze & set best defaults"
-            >
-              Auto {autoSimulateOn ? "ON" : "OFF"}
-            </button>
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={() => setSimulation((s) => ({ ...s, enabled: !s.enabled }))}
-                className={`flex-1 py-2 rounded-lg text-xs font-semibold border ${
-                  simulation.enabled ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-300"
-                }`}
-              >
-                {simulation.enabled ? "Simulation ON" : "Simulation OFF"}
-              </button>
-
-              <button
-                type="button"
-                onClick={runAutoSimulateNow}
-                disabled={!hasImage}
-                className="py-2 px-3 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-200 disabled:opacity-40"
-                title="Analyze this image and set realistic defaults"
-              >
-                Auto Now
-              </button>
-            </div>
-
-            {[
-              { label: "Ink Limit", key: "inkLimit", min: 1.6, max: 3.0, step: 0.02, hint: "Lower = less saturated / more realistic" },
-              { label: "Dot Gain", key: "gain", min: 0, max: 0.18, step: 0.01, hint: "Darkens mids like fabric ink" },
-              { label: "Vibrance", key: "vibrance", min: 0.75, max: 1.0, step: 0.01, hint: "Keeps some color while realistic" },
-            ].map((s) => (
-              <div key={s.key} className={`${!hasImage ? "opacity-40 pointer-events-none" : ""}`}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-slate-300 font-medium">{s.label}</span>
-                  <span className="text-xs font-mono text-violet-300 bg-slate-900/40 px-2 py-0.5 rounded tabular-nums">
-                    {typeof simulation[s.key] === "number" ? simulation[s.key].toFixed(2) : ""}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={s.min}
-                  max={s.max}
-                  step={s.step}
-                  value={simulation[s.key]}
-                  onChange={(e) => setSimulation((p) => ({ ...p, [s.key]: parseFloat(e.target.value) }))}
-                  disabled={!hasImage}
-                  className="w-full h-2 bg-slate-900/60 rounded-full appearance-none cursor-pointer
-                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:h-5
-                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-violet-500
-                    [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-violet-500/30
-                    [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:rounded-full
-                    [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:border-0"
-                  style={{ touchAction: "none" }}
-                />
-                <div className="text-[10px] text-slate-500 mt-1">{s.hint}</div>
-              </div>
-            ))}
-
-            <div className="flex items-center justify-between pt-1">
-              <div className="text-[10px] text-slate-500">Enhance quality</div>
-              <div className="flex gap-2">
-                {["auto", "hq"].map((m) => (
-                  <button
-                    type="button"
-                    key={m}
-                    onClick={() => setEnhanceQuality(m)}
-                    className={`text-[10px] px-2 py-1 rounded-full border ${
-                      enhanceQuality === m ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-300"
-                    }`}
-                  >
-                    {m.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Batch */}
-        <section className="glass-panel rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-xs font-semibold text-white flex items-center gap-2">
-              <Layers size={14} className="text-violet-400" /> Batch Export
-            </h3>
-            <span className="text-[10px] text-slate-500">
-              {selectedCount}/{items.length} selected
-            </span>
-          </div>
-
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={openFilePicker}
-              className="flex-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold flex items-center justify-center gap-2"
-            >
-              <ListPlus size={14} /> Add
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setSelectedIds((prev) => {
-                  if (prev.size === items.length) return new Set();
-                  return new Set(items.map((x) => x.id));
-                })
-              }
-              disabled={!items.length}
-              className="py-2 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-semibold disabled:opacity-40"
-              title="Select all / clear"
-            >
-              {selectedCount === items.length && items.length ? "Clear" : "All"}
-            </button>
-
-            <button
-              type="button"
-              onClick={downloadSelectedZip}
-              disabled={!selectedCount || processing}
-              className="flex-1 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-2"
-            >
-              <Package size={14} /> ZIP
-            </button>
-          </div>
-
-          {!!items.length && (
-            <div className="mt-3 flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              {items.slice(0, 20).map((it) => {
-                const selected = selectedIds.has(it.id);
-                const active = it.id === activeId;
-                return (
-                  <div key={it.id} className="relative shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setActiveId(it.id)}
-                      className={`relative w-12 h-12 rounded-xl border overflow-hidden ${
-                        active ? "border-violet-500" : "border-white/10"
-                      }`}
-                      title={it.name}
-                    >
-                      <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSelectedIds((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(it.id)) next.delete(it.id);
-                          else next.add(it.id);
-                          return next;
-                        })
-                      }
-                      className="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-black/70 border border-white/10 flex items-center justify-center shadow-lg"
-                      title={selected ? "Unselect" : "Select"}
-                    >
-                      {selected ? <CheckSquare size={15} className="text-emerald-400" /> : <Square size={15} className="text-slate-300" />}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="mt-2 text-[10px] text-slate-500">
-            Tip: click image = active view • checkbox = add/remove from ZIP
-          </div>
-        </section>
-      </div>
-    ),
-    [
-      MAX_DIMENSION,
-      autoSimulateOn,
-      customHeight,
-      customWidth,
-      enhanceQuality,
-      hasImage,
-      isPro,
-      items,
-      openFilePicker,
-      presets,
-      processing,
-      selectedColor,
-      selectedCount,
-      selectedIds,
-      selectedPreset,
-      showCustomInput,
-      downloadSelectedZip,
-      runAutoSimulateNow,
-      simulation,
-      shirtColors.dark,
-      shirtColors.light,
-      previewHintStyle,
-      activeId,
-    ]
-  );
+  }, [items, targetDimensions.width, targetDimensions.height, simulateCmyk, getZipLib, showToast, isDarkShirt]);
 
   /* ===================== LANDING ===================== */
   const Landing = (
@@ -2155,84 +1526,20 @@ export default function App() {
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-4 text-xs text-slate-500">
           <span className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" /> One-time cutout
+            <Sparkles size={14} className="text-amber-400" /> Smart CMYK toggle
           </span>
           <span className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" /> CMYK print simulation
+            <RefreshCw size={14} className="text-emerald-500" /> Beast-mode export
           </span>
           <span className="flex items-center gap-2">
-            <Zap size={14} className="text-emerald-500" /> HQ export option
+            <Package size={14} className="text-violet-400" /> Batch ZIP
           </span>
         </div>
       </div>
     </div>
   );
 
-  /* ===================== PANELS ===================== */
-  const OriginalPanel = (
-    <div className="min-w-0 flex flex-col overflow-hidden">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => removeItem(activeId)}
-            className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
-            title="Remove"
-          >
-            <Trash2 size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={resetAll}
-            className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
-            title="Reset all"
-          >
-            <X size={16} />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10">
-        <PreviewFrame aspect={designAspect}>
-          <div className="w-full h-full transparency-grid rounded-2xl overflow-hidden">
-            <ZoomableImage
-              src={activeItem?.originalUrl || ""}
-              alt="Original"
-              className="w-full h-full object-contain drop-shadow-2xl"
-              containerClassName="w-full h-full flex items-center justify-center"
-              defaultZoom={1.12}
-              hint={!isDesktop}
-            />
-          </div>
-        </PreviewFrame>
-
-        {activeItem?.meta && (
-          <div className="absolute bottom-3 left-3 bg-black/55 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-slate-200 z-20">
-            {activeItem.meta.width}×{activeItem.meta.height}
-          </div>
-        )}
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={openFilePicker}
-          className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
-        >
-          <Upload size={16} /> Upload
-        </button>
-        <button
-          type="button"
-          onClick={handlePasteButton}
-          className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
-        >
-          <Upload size={16} /> Paste
-        </button>
-      </div>
-    </div>
-  );
-
+  /* ===================== RESULT PANEL (REUSED) ===================== */
   function ResultPanel({ compact = false }) {
     const isCompare = viewMode === "compare";
     const isMockup = viewMode === "mockup";
@@ -2248,15 +1555,19 @@ export default function App() {
             <div className="flex items-center gap-2">
               {activeItem?.meta?.classification && (
                 <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">
-                  {activeItem.meta.classification.isLineArt ? "line-art auto" : "photo auto"}
+                  {activeItem.meta.classification.isLineArt ? "line-art" : "photo"}
                 </span>
               )}
-              {isMockup && <span className="text-[10px] text-slate-300 bg-slate-800/50 px-2 py-1 rounded-full">{currentColor?.label}</span>}
+              {simulateCmyk && (
+                <span className="text-[10px] text-amber-200 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded-full flex items-center gap-1">
+                  <Sparkles size={10} className="text-amber-400" /> CMYK
+                </span>
+              )}
             </div>
           </div>
         )}
 
-        <div className={`flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10 ${bgClass}`} style={{ backgroundColor: bgColor }}>
+        <div className={`flex-1 rounded-2xl overflow-hidden relative min-h-[240px] border border-white/10 ${bgClass}`} style={{ backgroundColor: bgColor }}>
           <PreviewFrame aspect={designAspect}>
             <div className="w-full h-full flex items-center justify-center">
               {isCompare ? (
@@ -2273,19 +1584,12 @@ export default function App() {
                   className="w-full h-full object-contain drop-shadow-2xl"
                   containerClassName="w-full h-full flex items-center justify-center"
                   style={previewHintStyle}
-                  defaultZoom={1.12}
+                  defaultZoom={isDesktop ? 1.12 : 1.06}
                   hint={!isDesktop}
                 />
               )}
             </div>
           </PreviewFrame>
-
-          {isMockup && (
-            <div
-              className="absolute top-4 left-1/2 -translate-x-1/2 w-20 h-6 border-b-4 rounded-b-[100px] pointer-events-none"
-              style={{ borderColor: isLightShirt ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.12)" }}
-            />
-          )}
 
           {(cutting || exporting) && (
             <div className="absolute inset-0 z-40 bg-black/45 backdrop-blur-sm flex items-center justify-center">
@@ -2303,53 +1607,26 @@ export default function App() {
               {targetDimensions.width && targetDimensions.height ? `${targetDimensions.width}×${targetDimensions.height}` : `${activeItem.meta.width}×${activeItem.meta.height}`}
             </div>
           )}
-
-          {simulation.enabled && (
-            <div className="absolute top-3 right-3 bg-black/40 backdrop-blur-sm px-2.5 py-1 rounded-full text-[10px] flex items-center gap-1.5 text-white z-20">
-              <Sparkles size={10} className="text-amber-400" />
-              CMYK Preview
-            </div>
-          )}
         </div>
 
-        <div className="mt-3 flex gap-2">
-          {[
-            { mode: "compare", icon: SplitSquareHorizontal, label: "Compare" },
-            { mode: "mockup", icon: Shirt, label: "Mockup" },
-          ].map(({ mode, icon: Icon, label }) => (
-            <button
-              type="button"
-              key={mode}
-              onClick={() => setViewMode(mode)}
-              className={[
-                "flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2",
-                viewMode === mode ? "bg-violet-600 text-white shadow-lg shadow-violet-600/20" : "bg-white/5 hover:bg-white/10 text-slate-300",
-              ].join(" ")}
-            >
-              <Icon size={18} /> {label}
-            </button>
-          ))}
-        </div>
-
-        {!isDesktop && (
-          <div className="mt-3 glass-panel rounded-xl p-3">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Quick Colors</div>
-            <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
-              {[...shirtColors.dark, ...shirtColors.light].map((c) => (
-                <button
-                  type="button"
-                  key={c.name}
-                  onClick={() => setSelectedColor(c.name)}
-                  className={[
-                    "shrink-0 w-9 h-9 rounded-xl border-2 transition-all",
-                    selectedColor === c.name ? "border-violet-500 scale-105" : "border-white/10 hover:border-white/30",
-                  ].join(" ")}
-                  style={{ backgroundColor: c.bg }}
-                  title={c.label}
-                />
-              ))}
-            </div>
-            <div className="mt-2 text-[10px] text-slate-500">Switch to Mockup to see color on shirt.</div>
+        {!compact && (
+          <div className="mt-3 flex gap-2">
+            {[
+              { mode: "compare", icon: SplitSquareHorizontal, label: "Compare" },
+              { mode: "mockup", icon: Shirt, label: "Mockup" },
+            ].map(({ mode, icon: Icon, label }) => (
+              <button
+                type="button"
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                className={[
+                  "flex-1 py-3 sm:py-4 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2",
+                  viewMode === mode ? "bg-violet-600 text-white shadow-lg shadow-violet-600/20" : "bg-white/5 hover:bg-white/10 text-slate-300",
+                ].join(" ")}
+              >
+                <Icon size={18} /> {label}
+              </button>
+            ))}
           </div>
         )}
       </div>
@@ -2379,18 +1656,6 @@ export default function App() {
             {activeItem.meta.detectedBackground === "black" ? <Moon size={12} /> : <Sun size={12} />}
             {activeItem.meta.detectedBackground} bg
           </span>
-        )}
-
-        {isDesktop && hasImage && (
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((s) => !s)}
-            className="hidden lg:flex px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 items-center gap-2"
-            title={sidebarOpen ? "Hide panel" : "Show panel"}
-          >
-            <Sliders size={14} className="text-violet-300" />
-            {sidebarOpen ? "Hide" : "Show"}
-          </button>
         )}
 
         <button
@@ -2439,7 +1704,7 @@ export default function App() {
           <div className="bg-slate-800/50 rounded-2xl p-6 mb-6 text-left">
             <h3 className="font-semibold text-white mb-4">Pro includes:</h3>
             <ul className="space-y-3 text-sm">
-              {["Unlimited designs", "HQ export enhancement", "Batch ZIP", "Advanced controls", "Priority support"].map((f, i) => (
+              {["Unlimited designs", "Poster preset", "Batch ZIP", "Priority support"].map((f, i) => (
                 <li key={i} className="flex items-center gap-2 text-slate-300">
                   <Check size={16} className="text-emerald-500" />
                   {f}
@@ -2448,7 +1713,14 @@ export default function App() {
             </ul>
           </div>
 
-          <button type="button" onClick={() => { setIsPro(true); setShowProModal(false); }} className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3">
+          <button
+            type="button"
+            onClick={() => {
+              setIsPro(true);
+              setShowProModal(false);
+            }}
+            className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-600 rounded-xl font-bold text-white shadow-lg mb-3"
+          >
             Go Pro — $9/month
           </button>
           <button type="button" onClick={() => setShowProModal(false)} className="w-full py-3 text-slate-500 hover:text-slate-300 text-sm">
@@ -2459,128 +1731,424 @@ export default function App() {
     </div>
   ) : null;
 
-  /* ===================== DESKTOP WORKSPACE ===================== */
-  const DesktopWorkspace = (
-    <div className="flex-1 flex overflow-hidden">
-      <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6" onDrop={onDropAny} onDragOver={onDragOver} onDragLeave={onDragLeave}>
-        <div className="h-full grid grid-cols-2 gap-3 sm:gap-4 lg:gap-6 overflow-hidden">
-          <div className="min-w-0 flex flex-col overflow-hidden">{OriginalPanel}</div>
-          <div className="min-w-0 flex flex-col overflow-hidden">{activeItem ? <ResultPanel /> : null}</div>
-        </div>
-      </main>
-
-      <aside
-        className={`hidden lg:flex border-l border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl flex-col shrink-0 transition-all duration-200 ease-out ${
-          sidebarOpen ? "w-[360px]" : "w-[72px]"
-        }`}
-      >
-        <div className="p-3 border-b border-white/5 flex items-center justify-between">
-          <div className={`text-xs font-bold text-white/80 ${sidebarOpen ? "" : "hidden"}`}>Controls</div>
+  /* ===================== MOBILE: ONE-SCREEN WORKFLOW ===================== */
+  const MobileOneScreen = hasImage ? (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Top strip: Original mini + Batch thumbnails + Batch buttons (NO MODALS) */}
+      <div className="shrink-0 border-b border-white/5 bg-[#0c0c0f]/90 backdrop-blur-xl">
+        <div className="px-3 py-2 flex items-center gap-2">
+          {/* Original mini */}
           <button
             type="button"
-            onClick={() => setSidebarOpen((s) => !s)}
-            className="p-2 rounded-xl hover:bg-white/5 text-slate-300"
-            title={sidebarOpen ? "Collapse" : "Expand"}
+            onClick={() => setViewMode("compare")}
+            className="shrink-0 w-12 h-12 rounded-2xl border border-white/10 overflow-hidden bg-white/5"
+            title="Tap to Compare"
           >
-            <ChevronDown size={16} className={`transition-transform ${sidebarOpen ? "rotate-90" : "-rotate-90"}`} />
+            <img src={activeItem?.originalUrl || ""} alt="Original thumb" className="w-full h-full object-cover" />
           </button>
+
+          {/* Batch thumbs */}
+          <div className="flex-1 overflow-x-auto no-scrollbar">
+            <div className="flex items-center gap-2">
+              {items.slice(0, 30).map((it) => {
+                const active = it.id === activeId;
+                return (
+                  <div key={it.id} className="relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveId(it.id)}
+                      className={`w-12 h-12 rounded-2xl border overflow-hidden ${active ? "border-violet-500" : "border-white/10"}`}
+                      title={it.name}
+                    >
+                      <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeItem(it.id)}
+                      className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-black/70 border border-white/10 flex items-center justify-center shadow-lg"
+                      title="Remove item"
+                    >
+                      <X size={12} className="text-slate-200" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Batch 3 buttons */}
+          <div className="shrink-0 flex items-center gap-2">
+            <button type="button" onClick={openFilePicker} className="w-11 h-11 rounded-2xl bg-violet-600 text-white flex items-center justify-center" title="Add">
+              <Upload size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={clearAll}
+              disabled={!items.length || processing}
+              className="w-11 h-11 rounded-2xl bg-white/5 hover:bg-white/10 disabled:opacity-40 text-slate-200 flex items-center justify-center"
+              title="Clear all"
+            >
+              <Trash2 size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={downloadZipAll}
+              disabled={!items.length || processing}
+              className="w-11 h-11 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white flex items-center justify-center"
+              title="Download ZIP"
+            >
+              <Package size={18} />
+            </button>
+          </div>
         </div>
+      </div>
 
-        <div className={`p-5 overflow-y-auto flex-1 ${sidebarOpen ? "" : "px-2"}`}>
-          {sidebarOpen ? (
-            <SidebarContent />
-          ) : (
-            <div className="flex flex-col items-center gap-2 pt-2">
-              <button type="button" onClick={() => setSidebarOpen(true)} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Open panel">
-                <Sliders size={18} className="text-violet-300" />
-              </button>
+      {/* Main preview takes maximum space */}
+      <div className="flex-1 overflow-hidden px-3 pt-2 pb-[168px]">
+        <div className="h-full">
+          <div className="h-full rounded-2xl overflow-hidden border border-white/10">
+            <ResultPanel compact />
+          </div>
+        </div>
+      </div>
 
+      {/* Inline controls dock (no sheet, no scrolling page) */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/92 backdrop-blur-xl pb-safe" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div className="px-3 pt-3 pb-2 space-y-2">
+          {/* Row 1: Mode + CMYK + Download */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2">
               <button
                 type="button"
-                onClick={downloadActivePng}
-                disabled={!activeItem || processing}
-                className="w-12 h-12 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 flex items-center justify-center"
-                title="Download PNG"
+                onClick={() => setViewMode("compare")}
+                className={`flex-1 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+                  viewMode === "compare" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
+                }`}
               >
-                <Download size={18} className="text-white" />
+                <SplitSquareHorizontal size={18} /> Compare
               </button>
-
-              <button type="button" onClick={handlePasteButton} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Paste">
-                <Upload size={18} className="text-violet-300" />
-              </button>
-
-              <button type="button" onClick={openFilePicker} className="w-12 h-12 rounded-2xl bg-white/5 hover:bg-white/10 flex items-center justify-center" title="Upload">
-                <Upload size={18} className="text-violet-300" />
+              <button
+                type="button"
+                onClick={() => setViewMode("mockup")}
+                className={`flex-1 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 ${
+                  viewMode === "mockup" ? "bg-violet-600 text-white" : "bg-white/5 text-slate-200"
+                }`}
+              >
+                <Shirt size={18} /> Mockup
               </button>
             </div>
-          )}
-        </div>
 
-        {sidebarOpen && (
-          <div className="p-5 bg-[#08080a] border-t border-white/5">
+            <button
+              type="button"
+              onClick={() => setSimulateCmyk((v) => !v)}
+              className={`px-3 py-3 rounded-xl font-bold text-sm border ${
+                simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
+              }`}
+              title="Simulate CMYK"
+            >
+              <span className="flex items-center gap-2">
+                <Sparkles size={16} className={simulateCmyk ? "text-amber-400" : "text-slate-300"} /> CMYK
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={downloadActivePng}
               disabled={!activeItem || processing}
-              className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-600 py-4 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.98] text-base"
+              className="px-4 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40 flex items-center gap-2"
             >
-              <Download size={20} /> Download PNG
+              <Download size={18} /> PNG
             </button>
-            <p className="text-[10px] text-center text-slate-600 mt-3">{isPro ? "HQ export available • PNG transparency" : "Free tier"}</p>
           </div>
-        )}
-      </aside>
-    </div>
-  );
 
-  /* ===================== MOBILE WORKSPACE ===================== */
-  const MobileWorkspace = (
-    <div className="flex-1 overflow-y-auto px-3 pt-3 pb-24" onDrop={onDropAny} onDragOver={onDragOver} onDragLeave={onDragLeave}>
-      <div className="glass-panel rounded-2xl p-3 mb-3">
-        <div className="flex items-center justify-between">
-          <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Original</div>
+          {/* Row 2: Presets strip + Paste/Upload quick */}
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => removeItem(activeId)} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Remove">
-              <Trash2 size={16} />
+            <div className="flex-1 overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-2">
+                {presets.map((p) => {
+                  const needsPro = p.pro && !isPro;
+                  const active = selectedPreset === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        if (needsPro) {
+                          setShowProModal(true);
+                          return;
+                        }
+                        setSelectedPreset(p.id);
+                        setTargetDimensions({ width: p.width, height: p.height });
+                      }}
+                      className={[
+                        "shrink-0 px-4 py-2.5 rounded-full text-xs font-bold border transition-all",
+                        active ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-200",
+                        needsPro ? "opacity-60" : "",
+                      ].join(" ")}
+                      title={p.desc}
+                    >
+                      <span className="flex items-center gap-2">
+                        {needsPro && <Lock size={12} className="text-slate-400" />}
+                        {p.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button type="button" onClick={handlePasteButton} className="px-4 py-2.5 rounded-full bg-white/5 text-slate-200 font-bold text-xs">
+              Paste
             </button>
-            <button type="button" onClick={resetAll} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200" title="Reset all">
-              <X size={16} />
+            <button type="button" onClick={openFilePicker} className="px-4 py-2.5 rounded-full bg-white/5 text-slate-200 font-bold text-xs">
+              Add
             </button>
           </div>
-        </div>
-        <div className="mt-3 border border-white/10 rounded-2xl overflow-hidden">
-          <PreviewFrame aspect={designAspect}>
-            <div className="w-full h-full transparency-grid">
-              <ZoomableImage
-                src={activeItem?.originalUrl || ""}
-                alt="Original"
-                className="w-full h-full object-contain drop-shadow-2xl"
-                containerClassName="w-full h-full flex items-center justify-center"
-                defaultZoom={1.08}
-                hint={false}
-              />
+
+          {/* Row 3: Colors (only when mockup) */}
+          {viewMode === "mockup" && (
+            <div className="overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-2 py-1">
+                {[...shirtColors.dark, ...shirtColors.light].map((c) => (
+                  <button
+                    key={c.name}
+                    type="button"
+                    onClick={() => setSelectedColor(c.name)}
+                    className={[
+                      "shrink-0 w-10 h-10 rounded-2xl border-2 transition-all",
+                      selectedColor === c.name ? "border-violet-500 scale-[1.03]" : "border-white/10",
+                    ].join(" ")}
+                    style={{ backgroundColor: c.bg }}
+                    title={c.label}
+                  />
+                ))}
+              </div>
             </div>
-          </PreviewFrame>
+          )}
         </div>
       </div>
-
-      <div className="glass-panel rounded-2xl p-3">
-        <div className="flex items-center justify-between">
-          <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Result • {viewMode === "mockup" ? "Mockup" : "Compare"}</div>
-          <button type="button" onClick={() => setMobileSettingsOpen(true)} className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-xs">
-            Settings
-          </button>
-        </div>
-        <div className="mt-3">{activeItem ? <ResultPanel compact /> : null}</div>
-      </div>
-
-      {dragActive && (
-        <div className="fixed inset-0 z-[70] bg-violet-500/10 backdrop-blur-[2px] pointer-events-none">
-          <div className="absolute inset-4 rounded-3xl border-2 border-dashed border-violet-400/60" />
-        </div>
-      )}
     </div>
-  );
+  ) : null;
+
+  /* ===================== DESKTOP: CLEAN WORKSPACE ===================== */
+  const DesktopWorkspace = hasImage ? (
+    <div className="flex-1 flex overflow-hidden">
+      <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6" onDrop={onDropAny} onDragOver={onDragOver} onDragLeave={onDragLeave}>
+        <div className="h-full grid grid-cols-2 gap-3 sm:gap-4 lg:gap-6 overflow-hidden">
+          {/* Original */}
+          <div className="min-w-0 flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Original</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => removeItem(activeId)}
+                  className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
+                  title="Remove"
+                  disabled={!activeId}
+                >
+                  <Trash2 size={16} />
+                </button>
+                <button
+                  type="button"
+                  onClick={clearAll}
+                  className="text-slate-500 hover:text-white p-1.5 hover:bg-white/5 rounded-lg transition-all"
+                  title="Clear all"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 rounded-2xl overflow-hidden relative min-h-[260px] border border-white/10">
+              <PreviewFrame aspect={designAspect}>
+                <div className="w-full h-full transparency-grid rounded-2xl overflow-hidden">
+                  <ZoomableImage
+                    src={activeItem?.originalUrl || ""}
+                    alt="Original"
+                    className="w-full h-full object-contain drop-shadow-2xl"
+                    containerClassName="w-full h-full flex items-center justify-center"
+                    defaultZoom={1.12}
+                    hint={false}
+                  />
+                </div>
+              </PreviewFrame>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button type="button" onClick={openFilePicker} className="py-3 bg-violet-600 hover:bg-violet-500 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                <Upload size={16} /> Add
+              </button>
+              <button type="button" onClick={handlePasteButton} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                <Upload size={16} /> Paste
+              </button>
+            </div>
+
+            {/* Batch strip (3 buttons + thumbs) */}
+            <div className="mt-3 glass-panel rounded-2xl p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">Batch</div>
+                <div className="text-[10px] text-slate-500">{items.length} item(s)</div>
+              </div>
+
+              <div className="flex gap-2 mb-3">
+                <button
+                  type="button"
+                  onClick={openFilePicker}
+                  className="flex-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold flex items-center justify-center gap-2"
+                >
+                  <Upload size={14} /> Add
+                </button>
+                <button
+                  type="button"
+                  onClick={clearAll}
+                  disabled={!items.length || processing}
+                  className="flex-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-bold disabled:opacity-40 flex items-center justify-center gap-2"
+                >
+                  <Trash2 size={14} /> Clear All
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadZipAll}
+                  disabled={!items.length || processing}
+                  className="flex-1 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 text-white text-xs font-bold flex items-center justify-center gap-2"
+                >
+                  <Package size={14} /> Download ZIP
+                </button>
+              </div>
+
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                {items.map((it) => {
+                  const active = it.id === activeId;
+                  return (
+                    <div key={it.id} className="relative shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setActiveId(it.id)}
+                        className={`w-12 h-12 rounded-xl border overflow-hidden ${active ? "border-violet-500" : "border-white/10"}`}
+                        title={it.name}
+                      >
+                        <img src={it.cutoutUrl} alt="" className="w-full h-full object-contain transparency-grid" style={previewHintStyle} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeItem(it.id)}
+                        className="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-black/70 border border-white/10 flex items-center justify-center shadow-lg"
+                        title="Remove item"
+                      >
+                        <X size={14} className="text-slate-200" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Result + Controls */}
+          <div className="min-w-0 flex flex-col overflow-hidden">
+            <ResultPanel />
+
+            <div className="mt-4 grid grid-cols-1 gap-3">
+              {/* Presets */}
+              <div className="glass-panel rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-semibold text-white flex items-center gap-2">
+                    <Maximize2 size={14} className="text-violet-400" /> Export Size
+                  </h3>
+                  <div className="text-[10px] text-slate-500">Beast mode • always HQ</div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {presets.map((p) => {
+                    const needsPro = p.pro && !isPro;
+                    const active = selectedPreset === p.id;
+                    return (
+                      <button
+                        type="button"
+                        key={p.id}
+                        onClick={() => {
+                          if (needsPro) {
+                            setShowProModal(true);
+                            return;
+                          }
+                          setSelectedPreset(p.id);
+                          setTargetDimensions({ width: p.width, height: p.height });
+                        }}
+                        className={[
+                          "py-2.5 px-2 rounded-xl text-center transition-all relative border",
+                          active ? "border-violet-500/40 bg-violet-500/10 text-violet-200" : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
+                          needsPro ? "opacity-60" : "",
+                        ].join(" ")}
+                        title={p.desc}
+                      >
+                        {needsPro && <Lock size={12} className="absolute top-2 right-2 text-slate-400" />}
+                        <div className="font-bold text-xs">{p.label}</div>
+                        <div className="text-[9px] opacity-70">{p.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* CMYK toggle + Colors */}
+              <div className="glass-panel rounded-2xl p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-white flex items-center gap-2">
+                    <Sliders size={14} className="text-violet-400" /> Quick Controls
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setSimulateCmyk((v) => !v)}
+                    className={`text-[11px] px-3 py-1.5 rounded-full border font-bold ${
+                      simulateCmyk ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-white/10 bg-white/5 text-slate-200"
+                    }`}
+                    title="Simulate CMYK (auto tuned)"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Sparkles size={12} className={simulateCmyk ? "text-amber-400" : "text-slate-300"} /> Simulate CMYK
+                    </span>
+                  </button>
+                </div>
+
+                <div className="mt-4">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Mockup Colors</div>
+                  <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+                    {[...shirtColors.dark, ...shirtColors.light].map((c) => (
+                      <button
+                        type="button"
+                        key={c.name}
+                        onClick={() => setSelectedColor(c.name)}
+                        title={c.label}
+                        className={[
+                          "shrink-0 w-10 h-10 rounded-2xl border-2 transition-all",
+                          selectedColor === c.name ? "border-violet-500 scale-[1.04] shadow-lg shadow-violet-500/20" : "border-white/10 hover:border-white/20",
+                        ].join(" ")}
+                        style={{ backgroundColor: c.bg }}
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-2 text-[10px] text-slate-500">Tip: switch to Mockup to see shirt color.</div>
+                </div>
+              </div>
+
+              {/* Download */}
+              <div className="glass-panel rounded-2xl p-4">
+                <button
+                  type="button"
+                  onClick={downloadActivePng}
+                  disabled={!activeItem || processing}
+                  className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 disabled:opacity-40 py-4 rounded-2xl font-extrabold text-white flex items-center justify-center gap-2 shadow-lg shadow-violet-900/30 transition-all active:scale-[0.99]"
+                >
+                  <Download size={20} /> Download PNG
+                </button>
+                <div className="mt-2 text-[10px] text-center text-slate-500">One tap export • transparent PNG</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  ) : null;
 
   /* ===================== MAIN RENDER ===================== */
   return (
@@ -2601,52 +2169,10 @@ export default function App() {
         </div>
       )}
 
-      {!hasImage ? <div className="flex-1 overflow-hidden">{Landing}</div> : <>{isDesktop ? DesktopWorkspace : MobileWorkspace}</>}
-
-      {/* Mobile Settings Sheet */}
-      <MobileSheet
-        open={mobileSettingsOpen}
-        title="Settings"
-        onClose={() => setMobileSettingsOpen(false)}
-        footer={
-          <button
-            type="button"
-            onClick={() => {
-              setMobileSettingsOpen(false);
-              downloadActivePng();
-            }}
-            disabled={!activeItem || processing}
-            className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-40 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2"
-          >
-            <Download size={18} /> Download PNG
-          </button>
-        }
-      >
-        <SidebarContent dense />
-      </MobileSheet>
-
-      {/* Mobile Bottom Bar */}
-      {!isDesktop && hasImage && !mobileSettingsOpen && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0c0c0f]/90 backdrop-blur-xl pb-safe" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
-          <div className="p-2 flex items-center gap-2">
-            <button type="button" onClick={openFilePicker} className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold text-sm">
-              Upload
-            </button>
-
-            <button type="button" onClick={handlePasteButton} className="py-3 px-4 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-bold text-sm">
-              Paste
-            </button>
-
-            <button
-              type="button"
-              onClick={downloadActivePng}
-              disabled={!activeItem || processing}
-              className="py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-bold text-sm disabled:opacity-40"
-            >
-              PNG
-            </button>
-          </div>
-        </div>
+      {!hasImage ? (
+        <div className="flex-1 overflow-hidden">{Landing}</div>
+      ) : (
+        <>{isDesktop ? DesktopWorkspace : MobileOneScreen}</>
       )}
 
       {/* Global file input (MULTI) */}
@@ -2659,7 +2185,6 @@ export default function App() {
         onChange={(e) => {
           const files = e.target.files;
           if (files?.length) addFiles(files);
-          // reset input so selecting same file again works
           e.target.value = "";
         }}
       />
